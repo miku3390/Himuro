@@ -6,6 +6,7 @@ import { db } from "@/lib/db";
 import {
   characters,
   conversations,
+  convMembers,
   messages as messagesTable,
   wbEntries,
   wbVersions,
@@ -16,6 +17,7 @@ import {
   parseExamples,
   type CharacterCard,
   type Example,
+  type GroupStrategy,
   type Mode,
   type Tier,
   type WbCategory,
@@ -308,7 +310,7 @@ export async function createConversation(
 
 export async function updateConversation(
   id: string,
-  patch: { mode?: Mode; tier?: Tier; title?: string; chapter?: number },
+  patch: { mode?: Mode; tier?: Tier; title?: string; chapter?: number; groupStrategy?: GroupStrategy | null },
 ) {
   // 默认标题跟随模式（「XX · 日常/连载」），用户改过标题则保持不动
   if (patch.mode) {
@@ -332,8 +334,100 @@ export async function updateConversation(
 
 export async function deleteConversation(id: string) {
   db.delete(messagesTable).where(eq(messagesTable.conversationId, id)).run();
+  db.delete(convMembers).where(eq(convMembers.conversationId, id)).run();
   db.delete(conversations).where(eq(conversations.id, id)).run();
   revalidatePath("/");
+}
+
+/* ================================ 群聊 ================================ */
+
+/** 建群聊会话：至少 2 个成员；角色开场白不注入（群聊由用户先开口） */
+export async function createGroupConversation(
+  characterIds: string[],
+  strategy: GroupStrategy,
+): Promise<{ id: string }> {
+  const unique = [...new Set(characterIds)];
+  if (unique.length < 2) throw new Error("群聊至少需要 2 个角色");
+  const cards = unique
+    .map((id) => db.select().from(characters).where(eq(characters.id, id)).get())
+    .filter(Boolean) as (typeof characters.$inferSelect)[];
+  if (cards.length < 2) throw new Error("部分角色不存在");
+
+  const id = uid();
+  db.insert(conversations)
+    .values({
+      id,
+      characterId: cards[0].id, // 主角色 = 第一个成员（页头展示用）
+      title: `群聊 · ${cards.map((c) => c.name).slice(0, 3).join("、")}${cards.length > 3 ? "等" : ""}`,
+      mode: "daily",
+      tier: "light",
+      chapter: 1,
+      summaryText: "",
+      summarizedCount: 0,
+      groupStrategy: strategy,
+      createdAt: now(),
+      updatedAt: now(),
+    })
+    .run();
+
+  cards.forEach((c, i) => {
+    db.insert(convMembers)
+      .values({
+        id: uid(),
+        conversationId: id,
+        characterId: c.id,
+        sort: i,
+        joinedAt: now(),
+      })
+      .run();
+  });
+
+  revalidatePath("/");
+  return { id };
+}
+
+export async function addConversationMember(conversationId: string, characterId: string) {
+  const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
+  if (!conv) throw new Error("会话不存在");
+  const card = db.select().from(characters).where(eq(characters.id, characterId)).get();
+  if (!card) throw new Error("角色不存在");
+  const existing = db
+    .select()
+    .from(convMembers)
+    .where(eq(convMembers.conversationId, conversationId))
+    .all();
+  if (existing.some((m) => m.characterId === characterId)) return;
+  db.insert(convMembers)
+    .values({
+      id: uid(),
+      conversationId,
+      characterId,
+      sort: existing.length,
+      joinedAt: now(),
+    })
+    .run();
+  // 从 1 人（异常态）恢复成 2 人时，补上群策略
+  if (!conv.groupStrategy) {
+    db.update(conversations)
+      .set({ groupStrategy: "mention", updatedAt: now() })
+      .where(eq(conversations.id, conversationId))
+      .run();
+  }
+  revalidatePath(`/chat/${conversationId}`);
+}
+
+export async function removeConversationMember(conversationId: string, characterId: string) {
+  const rows = db
+    .select()
+    .from(convMembers)
+    .where(eq(convMembers.conversationId, conversationId))
+    .all();
+  const target = rows.find((m) => m.characterId === characterId);
+  if (!target) return;
+  db.delete(convMembers).where(eq(convMembers.id, target.id)).run();
+  // 群聊只剩 1 人时保留成员行（仍按群聊渲染历史），但策略退化为 mention——
+  // 由「群聊=成员≥2」的判定自然回落到单聊流程
+  revalidatePath(`/chat/${conversationId}`);
 }
 
 /* ================================ 消息 ================================ */
@@ -395,7 +489,7 @@ export async function editUserMessageAndTruncate(
   return { conversationId: m.conversationId };
 }
 
-/** 复盘回写：把某条满意回复 + 它前面的用户输入，存进角色卡示例对话 */
+/** 复盘回写：把某条满意回复 + 它前面的用户输入，存进角色卡示例对话（群聊时写入发言人自己的卡） */
 export async function writeBackExample(messageId: string) {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m || m.role !== "assistant") throw new Error("只能回写角色回复");
@@ -409,7 +503,8 @@ export async function writeBackExample(messageId: string) {
 
   const conv = db.select().from(conversations).where(eq(conversations.id, m.conversationId)).get();
   if (!conv) throw new Error("会话不存在");
-  const card = db.select().from(characters).where(eq(characters.id, conv.characterId)).get();
+  const targetCharacterId = m.characterId ?? conv.characterId;
+  const card = db.select().from(characters).where(eq(characters.id, targetCharacterId)).get();
   if (!card) throw new Error("角色不存在");
 
   const examples = parseExamples(card.examplesJson);

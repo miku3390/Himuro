@@ -1,6 +1,11 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { characters, conversations, messages as messagesTable } from "@/lib/db/schema";
+import {
+  characters,
+  conversations,
+  convMembers,
+  messages as messagesTable,
+} from "@/lib/db/schema";
 import { getSettings } from "@/lib/settings";
 
 export const runtime = "nodejs";
@@ -33,8 +38,22 @@ export async function GET(req: Request) {
     .all();
   const settings = getSettings();
 
-  const roleLabel = (role: string) =>
-    role === "user" ? "你" : card?.name ?? "角色";
+  // 发言人名字映射（群聊）：成员 + 历史消息中出现过的角色
+  const nameById: Record<string, string> = {};
+  const ids = new Set<string>([
+    ...db.select({ cid: convMembers.characterId }).from(convMembers).where(eq(convMembers.conversationId, conversationId)).all().map((r) => r.cid),
+    ...rows.map((r) => r.characterId).filter((x): x is string => Boolean(x)),
+  ]);
+  for (const cid of ids) {
+    const c = db.select({ name: characters.name }).from(characters).where(eq(characters.id, cid)).get();
+    if (c) nameById[cid] = c.name;
+  }
+
+  const roleLabel = (m: { role: string; characterId: string | null }) => {
+    if (m.role === "user") return "你";
+    if (m.characterId && nameById[m.characterId]) return nameById[m.characterId];
+    return card?.name ?? "角色";
+  };
 
   let payload: string;
   let filename: string;
@@ -65,6 +84,7 @@ export async function GET(req: Request) {
         model: conv.tier === "quality" ? settings.quality : settings.light,
         messages: rows.map((m) => ({
           role: m.role,
+          speaker: m.role === "assistant" ? (m.characterId ? (nameById[m.characterId] ?? null) : (card?.name ?? null)) : null,
           content: m.content,
           emotion: m.emotion,
           starred: m.starred === 1,
@@ -84,7 +104,7 @@ export async function GET(req: Request) {
       "",
       ...rows.map(
         (m) =>
-          `${m.starred ? "★ " : ""}${roleLabel(m.role)}${m.emotion ? `（情绪目标：${m.emotion}）` : ""}：\n${m.content}\n`,
+          `${m.starred ? "★ " : ""}${roleLabel(m)}${m.emotion ? `（情绪目标：${m.emotion}）` : ""}：\n${m.content}\n`,
       ),
     ];
     payload = lines.join("\n");

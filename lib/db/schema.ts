@@ -93,8 +93,20 @@ export const conversations = sqliteTable("conversations", {
   summaryText: text("summary_text").notNull().default(""),
   /** 已被摘要覆盖的消息条数 */
   summarizedCount: integer("summarized_count").notNull().default(0),
+  /** 群聊发言策略：mention=谁被@谁答 rotate=依次发言 all=全员发言；null=非群聊 */
+  groupStrategy: text("group_strategy"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+});
+
+/** 群聊成员：会话存在成员行即为群聊（1:1 会话无成员行） */
+export const convMembers = sqliteTable("conv_members", {
+  id: text("id").primaryKey(),
+  conversationId: text("conversation_id").notNull(),
+  characterId: text("character_id").notNull(),
+  /** 发言顺序（rotate/all 策略用） */
+  sort: integer("sort").notNull().default(0),
+  joinedAt: integer("joined_at").notNull(),
 });
 
 /** 消息 */
@@ -104,6 +116,8 @@ export const messages = sqliteTable("messages", {
   idx: integer("idx").notNull(),
   role: text("role").notNull(), // user | assistant
   content: text("content").notNull(),
+  /** 群聊中的发言人（assistant 消息）；null = 单聊角色或用户消息 */
+  characterId: text("character_id"),
   /** 用户本轮的情绪目标（日常模式），如：安慰/斗嘴/并肩作战/自定义 */
   emotion: text("emotion"),
   /** 复盘星标：标出满意的回复，用于回写角色卡 */

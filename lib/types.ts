@@ -4,6 +4,15 @@ export type Mode = "daily" | "story";
 export type Tier = "light" | "quality";
 export type WbCategory = "人物" | "地点" | "事件" | "规则";
 
+/** 群聊发言策略 */
+export type GroupStrategy = "mention" | "rotate" | "all";
+
+export const GROUP_STRATEGY_LABEL: Record<GroupStrategy, string> = {
+  mention: "谁被@谁答",
+  rotate: "依次发言",
+  all: "全员发言",
+};
+
 export const MODE_LABEL: Record<Mode, string> = {
   daily: "日常聊天",
   story: "连载剧情",

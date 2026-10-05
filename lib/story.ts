@@ -1,8 +1,9 @@
 "use server";
 
 import { db } from "@/lib/db";
-import { conversations, wbEntries } from "@/lib/db/schema";
+import { conversations, convMembers, wbEntries } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { characters } from "@/lib/db/schema";
 import {
   getMessagesSince,
   getWorldbookEntriesForCharacter,
@@ -14,13 +15,30 @@ import type { WbCategory } from "@/lib/types";
 
 /** 连载剧情专属 AI 任务：下一章钩子 / 状态回写世界书（先出草稿，用户确认后入库） */
 
+/** 群聊感知的消息标签：assistant 消息署名发言人 */
+function makeLabeler(conversationId: string) {
+  const memberIds = db
+    .select({ cid: convMembers.characterId })
+    .from(convMembers)
+    .where(eq(convMembers.conversationId, conversationId))
+    .all();
+  const nameById: Record<string, string> = {};
+  for (const { cid } of memberIds) {
+    const c = db.select({ name: characters.name }).from(characters).where(eq(characters.id, cid)).get();
+    if (c) nameById[cid] = c.name;
+  }
+  return (m: { role: string; characterId: string | null }) =>
+    m.role === "user" ? "用户" : m.characterId && nameById[m.characterId] ? nameById[m.characterId] : "角色";
+}
+
 /** 生成「下一章钩子」 */
 export async function generateHook(conversationId: string): Promise<string> {
   const row = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
   if (!row) throw new Error("会话不存在");
 
+  const label = makeLabeler(conversationId);
   const recent = getMessagesSince(conversationId, 20);
-  const recentText = recent.map((m) => `${m.role === "user" ? "用户" : "角色"}：${m.content}`).join("\n");
+  const recentText = recent.map((m) => `${label(m)}：${m.content}`).join("\n");
   const s = getSettings();
   return chatComplete(
     modelFor(s, row.tier === "quality" ? "quality" : "light"),
@@ -38,9 +56,10 @@ export async function distillWorldbookDraft(
   const row = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
   if (!row) throw new Error("会话不存在");
 
+  const label = makeLabeler(conversationId);
   const recent = getMessagesSince(conversationId, 20);
   const recentText = recent
-    .map((m) => `${m.role === "user" ? "用户" : "角色"}：${m.content}`)
+    .map((m) => `${label(m)}：${m.content}`)
     .join("\n")
     .slice(0, 4000);
 

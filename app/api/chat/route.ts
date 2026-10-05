@@ -3,31 +3,33 @@ import { db } from "@/lib/db";
 import { conversations, messages as messagesTable, msgChunks } from "@/lib/db/schema";
 import {
   getCharacterCard,
-  getRecentMessages,
   getWorldbookEntriesForCharacter,
-  KEYWORD_SCAN_WINDOW,
-  matchWorldbook,
   maybeUpdateSummary,
-  searchVectorMemories,
-  storeEmbedding,
-  VERBATIM_WINDOW,
 } from "@/lib/memory";
-import { buildSystemPrompt } from "@/lib/prompt";
-import { streamChat, type ChatMessage } from "@/lib/llm";
-import { getSettings, modelFor } from "@/lib/settings";
+import { generateOneReply, type EmitFn } from "@/lib/chatEngine";
+import {
+  getConversationMembers,
+  lastSpeakerCharacterId,
+  selectSpeakers,
+} from "@/lib/group";
+import type { GroupStrategy } from "@/lib/types";
+import { getSettings } from "@/lib/settings";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
- * 聊天接口（SSE 流式）。
+ * 聊天接口（SSE 流式；单聊与群聊共用）。
  *
  * 请求：{ conversationId, content, emotion? }
  *      或重Roll：{ conversationId, reroll: true, rerollMessageId? }
- *      （rerollMessageId 是要替换的那条角色回复；不传则对最后一条角色回复重Roll）
- * 事件：{ t:"tok", v } 增量文本
- *      { t:"done", messageId, hits, summary } 结束（hits=本轮世界书命中，summary=最新摘要）
- *      { t:"err", message } 出错
+ *      （rerollMessageId 是要替换的那条角色回复；不传则对最后一条角色回复重Roll；
+ *        末尾是用户消息时直接续写——编辑重发用这个路径）
+ *
+ * 单聊事件：{t:"hits"} → {t:"tok"}* → {t:"done", messageId, userMessageId, summary}
+ * 群聊事件：{t:"speakers", speakers:[…]} → ({t:"speaker"} → {t:"hits"} → {t:"tok"}* →
+ *           {t:"speaker_done", messageId})* → {t:"done", userMessageId, summary}
+ *           被选中的发言者按顺序逐个生成，后发言者能看到前者本轮的发言。
  */
 export async function POST(req: Request) {
   const body = (await req.json()) as {
@@ -53,26 +55,35 @@ export async function POST(req: Request) {
     return Response.json({ error: "会话不存在" }, { status: 404 });
   }
 
-  const character = getCharacterCard(conv.characterId);
-  if (!character) {
-    return Response.json({ error: "角色不存在" }, { status: 404 });
+  const settings = getSettings();
+  const members = getConversationMembers(conversationId);
+  const isGroup = members.length >= 2;
+
+  // 单聊需要会话角色存在；群聊只看成员
+  if (!isGroup) {
+    const character = getCharacterCard(conv.characterId);
+    if (!character) {
+      return Response.json({ error: "角色不存在" }, { status: 404 });
+    }
   }
 
   // 1. 落库：普通发送 → 插入用户消息；重Roll → 删掉被替换的角色回复（含向量块）
-  const allCount = db
-    .select({ id: messagesTable.id })
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, conversationId))
-    .all().length;
-
-  let userMsgId: string;
+  let userMsgId = "__reroll__";
+  let rerollSpeakerId: string | null = null;
   if (isReroll) {
     if (body.rerollMessageId) {
-      // 指定了要替换的回复：删掉它（含向量块）
-      db.delete(msgChunks).where(eq(msgChunks.messageId, body.rerollMessageId)).run();
-      db.delete(messagesTable).where(eq(messagesTable.id, body.rerollMessageId)).run();
+      const target = db
+        .select()
+        .from(messagesTable)
+        .where(eq(messagesTable.id, body.rerollMessageId))
+        .get();
+      if (!target || target.conversationId !== conversationId) {
+        return Response.json({ error: "要重Roll的消息不存在" }, { status: 404 });
+      }
+      rerollSpeakerId = target.characterId;
+      db.delete(msgChunks).where(eq(msgChunks.messageId, target.id)).run();
+      db.delete(messagesTable).where(eq(messagesTable.id, target.id)).run();
     } else {
-      // 未指定：末尾是角色回复则删掉重生成；末尾是用户消息（编辑重发后）则直接续写
       const last = db
         .select()
         .from(messagesTable)
@@ -80,20 +91,26 @@ export async function POST(req: Request) {
         .all()
         .at(-1);
       if (last?.role === "assistant") {
+        rerollSpeakerId = last.characterId;
         db.delete(msgChunks).where(eq(msgChunks.messageId, last.id)).run();
         db.delete(messagesTable).where(eq(messagesTable.id, last.id)).run();
       }
+      // 末尾是用户消息（编辑重发后）→ 不删，直接续写
     }
-    userMsgId = "__reroll__"; // 占位：本轮没有新的用户消息需要入库/向量化
   } else {
     userMsgId = crypto.randomUUID();
     db.insert(messagesTable)
       .values({
         id: userMsgId,
         conversationId,
-        idx: allCount,
+        idx: db
+          .select({ id: messagesTable.id })
+          .from(messagesTable)
+          .where(eq(messagesTable.conversationId, conversationId))
+          .all().length,
         role: "user",
         content,
+        characterId: null,
         emotion: body.emotion || null,
         createdAt: Date.now(),
       })
@@ -104,88 +121,92 @@ export async function POST(req: Request) {
     .where(eq(conversations.id, conversationId))
     .run();
 
-  // 2. 组装 prompt：最近窗口 + 世界书命中 + 向量回忆 + 摘要
-  const recent = getRecentMessages(conversationId, VERBATIM_WINDOW);
-  const { entries } = getWorldbookEntriesForCharacter(conv.characterId);
-  const settings = getSettings();
-  const hits = matchWorldbook(
-    entries,
-    recent.slice(-KEYWORD_SCAN_WINDOW).map((m) => m.content),
-    settings.wbMaxHits,
-  );
+  // 2. 确定本轮发言者（群聊按策略；单聊固定为会话角色）
+  const lastSpeaker = lastSpeakerCharacterId(conversationId);
+  const singleCard = isGroup ? null : getCharacterCard(conv.characterId)!;
+  const singleEntries = isGroup ? [] : getWorldbookEntriesForCharacter(conv.characterId).entries;
 
-  const recentIds = recent.map((m) => m.id);
-  // 向量检索的查询文本：普通发送用刚输入的内容；重Roll用窗口内最后一条用户消息
-  const lastUser = [...recent].reverse().find((m) => m.role === "user");
-  const queryText = isReroll ? (lastUser?.content ?? "") : content;
-  let vectorMemories: { chunk: string; score: number }[] = [];
-  try {
-    vectorMemories = await searchVectorMemories(conversationId, queryText, recentIds);
-  } catch (err) {
-    console.error("[chat] 向量检索失败（忽略）:", err);
+  const speakers = isGroup
+    ? selectSpeakers(
+        (conv.groupStrategy as GroupStrategy) ?? "mention",
+        members,
+        content,
+        lastSpeaker,
+        rerollSpeakerId,
+      )
+    : [
+        {
+          characterId: conv.characterId,
+          sort: 0,
+          card: singleCard!,
+          entries: singleEntries,
+        },
+      ];
+
+  if (speakers.length === 0) {
+    return Response.json({ error: "没有可发言的成员" }, { status: 400 });
   }
 
-  const system = buildSystemPrompt({
-    character,
-    mode: conv.mode as "daily" | "story",
-    summary: conv.summaryText,
-    worldbookHits: hits,
-    vectorMemories,
-    emotion: body.emotion || null,
-    chapter: conv.chapter,
-  });
+  const memberNameById: Record<string, string> = {};
+  if (isGroup) {
+    for (const m of members) memberNameById[m.characterId] = m.card.name;
+    // 被重Roll 的角色可能已不在成员列表（被移出群聊后重Roll 旧消息），补进映射
+    for (const s of speakers) memberNameById[s.characterId] = s.card.name;
+  }
 
-  const chatMessages: ChatMessage[] = [
-    { role: "system", content: system },
-    ...recent.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    })),
-  ];
-  // 3. 流式调用
-  const tier = conv.tier as "light" | "quality";
   const encoder = new TextEncoder();
-  const sse = (obj: unknown) => encoder.encode(`data: ${JSON.stringify(obj)}\n\n`);
+  const emit: EmitFn = (obj) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+  let controller!: ReadableStreamDefaultController;
 
   const stream = new ReadableStream({
-    async start(controller) {
-      let full = "";
+    async start(ctrl) {
+      controller = ctrl;
+      let lastAssistantId = "";
       try {
-        controller.enqueue(sse({ t: "hits", hits: hits.map((h) => ({ category: h.category, title: h.title, weight: h.weight })) }));
-        for await (const token of streamChat({
-          config: modelFor(settings, tier),
-          messages: chatMessages,
-          mockHint: { kind: "chat", characterName: character.name, userText: queryText, mode: conv.mode as "daily" | "story" },
-        })) {
-          full += token;
-          controller.enqueue(sse({ t: "tok", v: token }));
+        if (isGroup) {
+          emit({
+            t: "speakers",
+            speakers: speakers.map((s) => ({
+              characterId: s.card.id,
+              name: s.card.name,
+              emoji: s.card.emoji,
+            })),
+          });
         }
 
-        // 4. 回复入库（idx 取当前消息数，兼容重Roll场景）+ 记忆更新（失败不阻塞回复展示）
-        const assistantId = crypto.randomUUID();
-        const nextIdx = db
-          .select({ id: messagesTable.id })
-          .from(messagesTable)
-          .where(eq(messagesTable.conversationId, conversationId))
-          .all().length;
-        db.insert(messagesTable)
-          .values({
-            id: assistantId,
-            conversationId,
-            idx: nextIdx,
-            role: "assistant",
-            content: full,
-            createdAt: Date.now(),
-          })
-          .run();
-
-        try {
-          if (!isReroll) await storeEmbedding(conversationId, userMsgId, content);
-          await storeEmbedding(conversationId, assistantId, full);
-        } catch (err) {
-          console.error("[chat] 向量入库失败（忽略）:", err);
+        for (let i = 0; i < speakers.length; i++) {
+          const sp = speakers[i];
+          if (isGroup) {
+            emit({ t: "speaker", characterId: sp.card.id, name: sp.card.name, emoji: sp.card.emoji });
+          }
+          const r = await generateOneReply(
+            {
+              conversationId,
+              mode: conv.mode as "daily" | "story",
+              tier: conv.tier as "light" | "quality",
+              chapter: conv.chapter,
+              summary: conv.summaryText,
+              character: sp.card,
+              entries: sp.entries,
+              wbMaxHits: settings.wbMaxHits,
+              isGroup,
+              memberNameById,
+              groupOthers: members.filter((m) => m.characterId !== sp.characterId).map((m) => m.card.name),
+              content: i === 0 ? content : "",
+              emotion: body.emotion || null,
+              embedMessageId: !isReroll && i === 0 ? userMsgId : null,
+              embedMessageContent: content,
+            },
+            settings,
+            emit,
+          );
+          lastAssistantId = r.assistantId;
+          if (isGroup) {
+            emit({ t: "speaker_done", characterId: sp.card.id, messageId: r.assistantId });
+          }
         }
 
+        // 记忆更新（失败不阻塞回复展示）
         let summaryText = conv.summaryText;
         try {
           await maybeUpdateSummary(conversationId);
@@ -199,21 +220,17 @@ export async function POST(req: Request) {
           console.error("[chat] 摘要更新失败（忽略）:", err);
         }
 
-        controller.enqueue(
-          sse({
-            t: "done",
-            messageId: assistantId,
-            userMessageId: isReroll ? null : userMsgId,
-            summary: summaryText,
-          }),
-        );
+        emit({
+          t: "done",
+          messageId: lastAssistantId,
+          userMessageId: isReroll ? null : userMsgId,
+          summary: summaryText,
+        });
       } catch (err) {
-        controller.enqueue(
-          sse({
-            t: "err",
-            message: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        emit({
+          t: "err",
+          message: err instanceof Error ? err.message : String(err),
+        });
       } finally {
         controller.close();
       }

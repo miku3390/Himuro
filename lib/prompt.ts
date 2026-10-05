@@ -20,6 +20,8 @@ export type PromptInput = {
   vectorMemories: { chunk: string; score: number }[];
   emotion?: string | null;
   chapter?: number;
+  /** 群聊场景：其他成员的名字列表 */
+  groupOthers?: string[];
 };
 
 const MODE_DAILY = `# 模式：日常聊天
@@ -75,6 +77,15 @@ ${c.examples
       `# 更早对话中的相关回忆（按语义检索）\n${input.vectorMemories
         .map((m) => `- ${m.chunk}`)
         .join("\n")}`,
+    );
+  }
+
+  if (input.groupOthers && input.groupOthers.length > 0) {
+    parts.push(
+      `# 场景：多角色群聊
+- 这是一个群聊。除你之外的其他角色：${input.groupOthers.join("、")}。
+- 历史消息中「（名字）：」前缀标明发言者；你只以 ${c.name} 的身份发言，绝不替其他角色发言或描述他们的行动与心理。
+- 可以自然地回应其他角色的发言，但回复仍以和用户的互动为中心。`,
     );
   }
 

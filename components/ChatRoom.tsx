@@ -3,8 +3,10 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
+  addConversationMember,
   deleteMessage,
   editUserMessageAndTruncate,
+  removeConversationMember,
   saveEntryForCharacter,
   toggleStar,
   updateConversation,
@@ -12,16 +14,29 @@ import {
 } from "@/lib/actions";
 import { generateHook, distillWorldbookDraft } from "@/lib/story";
 import { speak, stopSpeak } from "@/lib/tts";
-import { EMOTION_PRESETS, MODE_LABEL, TIER_LABEL, type CharacterCard, type Mode, type Tier, type WbCategory } from "@/lib/types";
+import {
+  EMOTION_PRESETS,
+  GROUP_STRATEGY_LABEL,
+  MODE_LABEL,
+  TIER_LABEL,
+  type CharacterCard,
+  type GroupStrategy,
+  type Mode,
+  type Tier,
+  type WbCategory,
+} from "@/lib/types";
 import { badge, btnGhost, btnPrimary, card, input } from "@/lib/ui";
 
 type Msg = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  characterId?: string | null;
   emotion: string | null;
   starred: boolean;
 };
+
+type Member = { id: string; name: string; emoji: string; color: string };
 
 type Conv = {
   id: string;
@@ -30,10 +45,12 @@ type Conv = {
   tier: Tier;
   chapter: number;
   summary: string;
+  groupStrategy: GroupStrategy | null;
 };
 
 type Hit = { category: string; title: string; weight: number };
 type Draft = { category: string; title: string; content: string; keywords: string[]; weight: number };
+type Speaker = { characterId: string; name: string; emoji: string };
 
 function lastAssistantId(list: Msg[]): string | null {
   for (let i = list.length - 1; i >= 0; i--) if (list[i].role === "assistant") return list[i].id;
@@ -43,10 +60,16 @@ function lastAssistantId(list: Msg[]): string | null {
 export default function ChatRoom({
   conversation,
   character,
+  members,
+  isGroup,
+  allCharacters,
   initialMessages,
 }: {
   conversation: Conv;
   character: CharacterCard;
+  members: Member[];
+  isGroup: boolean;
+  allCharacters: Member[];
   initialMessages: Msg[];
 }) {
   const [conv, setConv] = useState(conversation);
@@ -54,8 +77,9 @@ export default function ChatRoom({
   const [inputVal, setInputVal] = useState("");
   const [emotion, setEmotion] = useState<string | null>(null);
   const [streaming, setStreaming] = useState("");
+  const [currentSpeaker, setCurrentSpeaker] = useState<Speaker | null>(null);
   const [busy, setBusy] = useState(false);
-  const [hits, setHits] = useState<Hit[]>([]);
+  const [hits, setHits] = useState<{ speaker?: string; hits: Hit[] }>({ hits: [] });
   const [summary, setSummary] = useState(conversation.summary);
   const [hook, setHook] = useState("");
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
@@ -75,10 +99,13 @@ export default function ChatRoom({
   }
 
   /* ---------------------------- SSE 流式公共流程 ---------------------------- */
+  // 群聊一轮会有多个发言者：每个 speaker 的文本通过 speaker_done 先行落库/上屏，
+  // done 事件只负责收尾（摘要 + 用户消息真实 id）。单聊则由 done 追加唯一的回复。
   async function runStream(
     payload: { content?: string; emotion?: string | null; reroll?: boolean; rerollMessageId?: string },
-  ): Promise<{ messageId: string; userMessageId?: string; text: string; summary?: string }> {
+  ): Promise<{ messageId: string; userMessageId?: string; text: string; summary?: string; appendedBySpeaker: boolean }> {
     setBusy(true);
+    let appendedBySpeaker = false;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -93,6 +120,7 @@ export default function ChatRoom({
       const decoder = new TextDecoder();
       let buf = "";
       let acc = "";
+      let speakerAcc = "";
       let done: { messageId: string; userMessageId?: string; summary?: string } | null = null;
       while (true) {
         const { done: eof, value } = await reader.read();
@@ -105,10 +133,33 @@ export default function ChatRoom({
           if (!line.startsWith("data:")) continue;
           const evt = JSON.parse(line.slice(5).trim());
           if (evt.t === "hits") {
-            setHits(evt.hits);
+            setHits({ speaker: evt.speaker, hits: evt.hits });
+          } else if (evt.t === "speaker") {
+            setCurrentSpeaker({ characterId: evt.characterId, name: evt.name, emoji: evt.emoji });
+            speakerAcc = "";
           } else if (evt.t === "tok") {
             acc += evt.v;
-            setStreaming(acc);
+            speakerAcc += evt.v;
+            setStreaming(speakerAcc);
+          } else if (evt.t === "speaker_done") {
+            // 注意：React 的 updater 是延迟执行的，必须先把 speakerAcc 快照成常量，
+            // 否则下面紧跟着的清零会把 updater 闭包里读到的内容变成空串
+            const spokenText = speakerAcc;
+            const spokenById = evt.characterId;
+            setMsgs((m) => [
+              ...m,
+              {
+                id: evt.messageId,
+                role: "assistant",
+                content: spokenText,
+                characterId: spokenById,
+                emotion: null,
+                starred: false,
+              },
+            ]);
+            appendedBySpeaker = true;
+            speakerAcc = "";
+            setCurrentSpeaker(null);
           } else if (evt.t === "done") {
             done = evt;
           } else if (evt.t === "err") {
@@ -117,9 +168,16 @@ export default function ChatRoom({
         }
       }
       if (!done) throw new Error("回复流中断");
-      return { messageId: done.messageId, userMessageId: done.userMessageId as string | undefined, text: acc, summary: done.summary };
+      return {
+        messageId: done.messageId,
+        userMessageId: done.userMessageId,
+        text: acc,
+        summary: done.summary,
+        appendedBySpeaker,
+      };
     } finally {
       setStreaming("");
+      setCurrentSpeaker(null);
       setBusy(false);
     }
   }
@@ -137,12 +195,22 @@ export default function ChatRoom({
         ...m.map((x) =>
           x.id === tmpId ? { ...x, id: r.userMessageId ?? `u-${Date.now()}` } : x,
         ),
-        { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false },
+        ...(r.appendedBySpeaker
+          ? []
+          : [
+              {
+                id: r.messageId,
+                role: "assistant" as const,
+                content: r.text,
+                characterId: null,
+                emotion: null,
+                starred: false,
+              },
+            ]),
       ]);
       if (r.summary) setSummary(r.summary);
     } catch (e) {
       flash(e instanceof Error ? e.message : String(e));
-      // 保留用户消息，只是没有回复
       setMsgs((m) => m.map((x) => (x.id === tmpId ? { ...x, id: `u-${Date.now()}` } : x)));
     }
     setEmotion(null);
@@ -156,7 +224,12 @@ export default function ChatRoom({
     setMsgs((m) => m.filter((x) => x.id !== target)); // 乐观移除旧回复
     try {
       const r = await runStream({ reroll: true, rerollMessageId: target });
-      setMsgs((m) => [...m, { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false }]);
+      if (!r.appendedBySpeaker) {
+        setMsgs((m) => [
+          ...m,
+          { id: r.messageId, role: "assistant", content: r.text, characterId: null, emotion: null, starred: false },
+        ]);
+      }
       if (r.summary) setSummary(r.summary);
     } catch (e) {
       flash(e instanceof Error ? e.message : "重Roll失败");
@@ -175,14 +248,18 @@ export default function ChatRoom({
     setEditingId(null);
     try {
       await editUserMessageAndTruncate(id, editText);
-      // UI 同步：保留到被编辑消息为止，其后全部移除
       const idx = msgs.findIndex((x) => x.id === id);
       setMsgs((m) => [
         ...m.slice(0, idx).map((x) => (x.id === id ? { ...x, content: editText.trim() } : x)),
         { ...m[idx], content: editText.trim() },
       ]);
-      const r = await runStream({ reroll: true }); // 末尾是刚编辑的用户消息，服务端直接续写
-      setMsgs((m) => [...m, { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false }]);
+      const r = await runStream({ reroll: true }); // 末尾是刚编辑的用户消息，服务端按策略续写
+      if (!r.appendedBySpeaker) {
+        setMsgs((m) => [
+          ...m,
+          { id: r.messageId, role: "assistant", content: r.text, characterId: null, emotion: null, starred: false },
+        ]);
+      }
       if (r.summary) setSummary(r.summary);
     } catch (e) {
       flash(e instanceof Error ? e.message : "编辑失败");
@@ -199,6 +276,23 @@ export default function ChatRoom({
   function patchConv(patch: Partial<Conv>) {
     setConv((c) => ({ ...c, ...patch }));
     startTransition(() => updateConversation(conv.id, patch));
+  }
+
+  /* ------------------------------ 群聊成员管理 ------------------------------ */
+  function addMember(characterId: string) {
+    if (!characterId) return;
+    startTransition(async () => {
+      await addConversationMember(conv.id, characterId);
+      flash("已加入群聊，下一轮开始生效");
+    });
+  }
+
+  function removeMember(characterId: string) {
+    if (members.length <= 1) return;
+    startTransition(async () => {
+      await removeConversationMember(conv.id, characterId);
+      flash("已移出群聊（其历史消息保留）");
+    });
   }
 
   /* ------------------------------ 连载工具 ------------------------------ */
@@ -258,6 +352,7 @@ export default function ChatRoom({
 
   /* -------------------------------- 渲染 -------------------------------- */
   const lastAssistant = lastAssistantId(msgs);
+  const nameOf = (cid?: string | null) => members.find((x) => x.id === cid) ?? null;
 
   return (
     <div className="flex min-h-[calc(100vh-7.5rem)] flex-col gap-3 lg:flex-row">
@@ -269,7 +364,7 @@ export default function ChatRoom({
             ←
           </Link>
           <span className="text-lg">{character.emoji}</span>
-          <span className="text-sm font-semibold">{character.name}</span>
+          <span className="text-sm font-semibold">{isGroup ? conv.title : character.name}</span>
 
           <select
             className="ml-2 rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs"
@@ -289,6 +384,21 @@ export default function ChatRoom({
             <option value="light">轻量档</option>
             <option value="quality">高质量档</option>
           </select>
+
+          {isGroup && conv.groupStrategy && (
+            <select
+              className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs"
+              value={conv.groupStrategy}
+              onChange={(e) => patchConv({ groupStrategy: e.target.value as GroupStrategy })}
+              title="群聊发言策略"
+            >
+              {(Object.keys(GROUP_STRATEGY_LABEL) as GroupStrategy[]).map((s) => (
+                <option key={s} value={s}>
+                  {GROUP_STRATEGY_LABEL[s]}
+                </option>
+              ))}
+            </select>
+          )}
 
           {conv.mode === "story" && (
             <span className={badge + " bg-emerald-50 text-emerald-600"}>
@@ -318,9 +428,15 @@ export default function ChatRoom({
           <div className="flex flex-col gap-4">
             {msgs.map((m) => {
               const isEditing = editingId === m.id;
+              const speaker = m.role === "assistant" ? nameOf(m.characterId) : null;
               return (
                 <div key={m.id} className={"flex " + (m.role === "user" ? "justify-end" : "justify-start")}>
                   <div className={"max-w-[85%] " + (m.role === "user" ? "text-right" : "")}>
+                    {speaker && (
+                      <span className="mb-1 block text-xs font-medium" style={{ color: speaker.color }}>
+                        {speaker.emoji} {speaker.name}
+                      </span>
+                    )}
                     {m.emotion && (
                       <span className={badge + " mb-1 bg-pink-50 text-pink-500"}>目标：{m.emotion}</span>
                     )}
@@ -348,7 +464,9 @@ export default function ChatRoom({
                           "inline-block whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-left text-sm leading-relaxed " +
                           (m.role === "user"
                             ? "bg-indigo-600 text-white"
-                            : "bg-zinc-100 text-zinc-800")
+                            : speaker
+                              ? "bg-white border border-zinc-200 text-zinc-800"
+                              : "bg-zinc-100 text-zinc-800")
                         }
                       >
                         {m.content}
@@ -417,8 +535,15 @@ export default function ChatRoom({
             })}
             {streaming && (
               <div className="flex justify-start">
-                <div className="himuro-caret inline-block max-w-[85%] whitespace-pre-wrap rounded-2xl bg-zinc-100 px-4 py-2.5 text-left text-sm leading-relaxed text-zinc-800">
-                  {streaming}
+                <div className="max-w-[85%]">
+                  {currentSpeaker && (
+                    <span className="mb-1 block text-xs font-medium" style={{ color: nameOf(currentSpeaker.characterId)?.color ?? "#6366f1" }}>
+                      {currentSpeaker.emoji} {currentSpeaker.name} 正在说…
+                    </span>
+                  )}
+                  <div className="himuro-caret inline-block max-w-full whitespace-pre-wrap rounded-2xl bg-zinc-100 px-4 py-2.5 text-left text-sm leading-relaxed text-zinc-800">
+                    {streaming}
+                  </div>
                 </div>
               </div>
             )}
@@ -451,6 +576,11 @@ export default function ChatRoom({
                 value={emotion && !EMOTION_PRESETS.includes(emotion as (typeof EMOTION_PRESETS)[number]) ? emotion : ""}
                 onChange={(e) => setEmotion(e.target.value || null)}
               />
+              {isGroup && conv.groupStrategy === "mention" && (
+                <span className="ml-2 text-[11px] text-zinc-400">
+                  提示：在消息里写成员名字（如「{members[1]?.name ?? character.name}」）即可点名
+                </span>
+              )}
             </div>
           )}
           <div className="flex items-end gap-2">
@@ -471,10 +601,53 @@ export default function ChatRoom({
         </div>
       </div>
 
-      {/* 右侧栏：记忆透明化 + 连载工具 */}
+      {/* 右侧栏：群聊成员 + 记忆透明化 + 连载工具 */}
       <aside className="flex w-full shrink-0 flex-col gap-3 lg:w-80">
         {notice && (
           <div className="rounded-xl bg-indigo-50 px-3 py-2 text-xs text-indigo-600">{notice}</div>
+        )}
+
+        {isGroup && (
+          <section className={card + " p-4"}>
+            <h3 className="mb-2 text-sm font-semibold">群聊成员（{members.length}）</h3>
+            <ul className="flex flex-col gap-1.5">
+              {members.map((mb) => (
+                <li key={mb.id} className="flex items-center gap-2 text-sm">
+                  <span className="text-base">{mb.emoji}</span>
+                  <span className="min-w-0 flex-1 truncate">{mb.name}</span>
+                  {mb.id === character.id ? (
+                    <span className={badge + " bg-indigo-50 text-indigo-500"}>主角色</span>
+                  ) : (
+                    <button
+                      className="text-xs text-zinc-400 hover:text-red-500"
+                      disabled={pending}
+                      onClick={() => removeMember(mb.id)}
+                    >
+                      移出
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <select
+              className={input + " mt-2 text-xs"}
+              value=""
+              disabled={pending}
+              onChange={(e) => addMember(e.target.value)}
+            >
+              <option value="">＋ 添加成员…</option>
+              {allCharacters
+                .filter((c) => !members.some((m) => m.id === c.id))
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.emoji} {c.name}
+                  </option>
+                ))}
+            </select>
+            <p className="mt-1.5 text-[11px] text-zinc-400">
+              策略：{conv.groupStrategy ? GROUP_STRATEGY_LABEL[conv.groupStrategy] : "—"}（顶栏可切换）
+            </p>
+          </section>
         )}
 
         {conv.mode === "story" && (
@@ -545,12 +718,14 @@ export default function ChatRoom({
         )}
 
         <section className={card + " p-4"}>
-          <h3 className="mb-2 text-sm font-semibold">本轮世界书命中</h3>
-          {hits.length === 0 ? (
+          <h3 className="mb-2 text-sm font-semibold">
+            本轮世界书命中{hits.speaker ? `（${hits.speaker}）` : ""}
+          </h3>
+          {hits.hits.length === 0 ? (
             <p className="text-xs text-zinc-400">暂无命中。聊天内容里出现条目关键词时，对应设定会自动注入。</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
-              {hits.map((h, i) => (
+              {hits.hits.map((h, i) => (
                 <span key={i} className={badge + " bg-emerald-50 text-emerald-600"}>
                   {h.category}·{h.title}（{h.weight}）
                 </span>

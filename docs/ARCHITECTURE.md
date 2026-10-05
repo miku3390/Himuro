@@ -60,6 +60,26 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
     └─ userMessageId 必须回传：前端用它替换乐观插入的临时消息 id，否则后续「编辑/删除」找不到消息
 ```
 
+### 群聊事件流（同一接口，会话成员 ≥2 时自动切换）
+
+```
+{t:"speakers", speakers:[{characterId,name,emoji}]}   本轮发言者名单（策略选出）
+  → 每位发言者依次：
+    {t:"speaker", ...} → {t:"hits", speaker} → {t:"tok"}* → {t:"speaker_done", messageId}
+  → {t:"done", userMessageId, summary}
+```
+
+## 群聊机制（lib/group.ts + lib/chatEngine.ts）
+
+- **判定**：会话在 `conv_members` 表里有 ≥2 行即为群聊（1:1 会话不写成员表）；消息上的 `characterId` 标记发言人。
+- **发言策略**（`conversations.groupStrategy`，聊天页顶栏可切换）：
+  - `mention 谁被@谁答`（默认）：消息里点名（全名或去「（副本）」后缀的基础名）的成员回应；没人被点名则轮换下一位
+  - `rotate 依次发言`：上一位发言者的下一位（循环）
+  - `all 全员发言`：全部成员按 sort 顺序
+- **同轮多角色**：被选中的发言者按顺序**逐个**生成（lib/chatEngine.ts 每次重新读消息窗口，后发言者能看到前者本轮的发言）；system prompt 附「群聊场景」块 + 历史消息带「（名字）：」前缀，禁止替其他角色发言。
+- **记忆**：世界书命中按成员用自己的世界书独立计算；滚动摘要与向量库全群共享。
+- **前端坑位**：React updater 延迟执行——speaker_done 处理里闭包引用的累加变量必须先快照（`const spokenText = speakerAcc`）再清零，否则消息内容为空串（已踩过的坑，见 ChatRoom.tsx 注释）。
+
 客户端（components/ChatRoom.tsx）用 fetch + ReadableStream 解析 SSE，不依赖 EventSource（因为要 POST）。
 
 ## Prompt 模板（lib/prompt.ts）

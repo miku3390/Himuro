@@ -92,6 +92,49 @@ ok(impExamples.length === 2 && impExamples[0].user === "你冷吗？", `mes_exam
 const impWb = imp.id ? db.prepare("SELECT id FROM worldbooks WHERE character_id=?").get(imp.id) : null;
 ok(!!impWb, "导入角色自动建了世界书");
 
+/* ---------- 4. 群聊 ---------- */
+const lin = db.prepare("SELECT * FROM characters WHERE name='凛'").get();
+const gConvId = crypto.randomUUID();
+db.prepare(
+  "INSERT INTO conversations (id, character_id, title, mode, tier, chapter, summary_text, summarized_count, group_strategy, created_at, updated_at) VALUES (?,?,?,?,?,1,'',0,'mention',?,?)",
+).run(gConvId, char.id, "冒烟群聊 · 日常", "daily", "light", now, now);
+const insMember = db.prepare(
+  "INSERT INTO conv_members (id, conversation_id, character_id, sort, joined_at) VALUES (?,?,?,?,?)",
+);
+insMember.run(crypto.randomUUID(), gConvId, char.id, 0, now); // 小满
+insMember.run(crypto.randomUUID(), gConvId, lin.id, 1, now); // 凛
+
+// 4a. mention：点名「凛」→ 只有凛回应
+const g1 = await chat({ conversationId: gConvId, content: "凛，周末一起黑客马拉松吗？" });
+const spk1 = g1.events.filter((e) => e.t === "speakers").at(-1)?.speakers ?? [];
+const doneRows1 = g1.events.filter((e) => e.t === "speaker_done");
+ok(spk1.length === 1 && spk1[0].name === "凛", `mention 点名只让凛发言（实际 ${spk1.map((s) => s.name).join(",")}）`);
+ok(doneRows1.length === 1, "凛的回复经 speaker_done 落库");
+const g1msg = db.prepare("SELECT character_id FROM messages WHERE id=?").get(doneRows1[0].messageId);
+ok(g1msg?.character_id === lin.id, "群聊回复记录了发言人 characterId");
+
+// 4b. mention 无点名 → 轮换下一位（上一位凛 → 小满）
+const g2 = await chat({ conversationId: gConvId, content: "大家最近怎么样？" });
+const spk2 = g2.events.filter((e) => e.t === "speakers").at(-1)?.speakers ?? [];
+ok(spk2.length === 1 && spk2[0].name === "小满", `无点名时轮换到小满（实际 ${spk2.map((s) => s.name).join(",")}）`);
+
+// 4c. all 策略 → 全员按顺序发言
+db.prepare("UPDATE conversations SET group_strategy='all' WHERE id=?").run(gConvId);
+const g3 = await chat({ conversationId: gConvId, content: "最终决定：周六出发。" });
+const spk3 = g3.events.filter((e) => e.t === "speakers").at(-1)?.speakers ?? [];
+const doneRows3 = g3.events.filter((e) => e.t === "speaker_done");
+ok(spk3.length === 2 && spk3[0].name === "小满" && spk3[1].name === "凛", `全员按顺序发言（实际 ${spk3.map((s) => s.name).join("→")}）`);
+ok(doneRows3.length === 2, "两位成员的回复都落库");
+const assistantCount = db
+  .prepare("SELECT count(*) n FROM messages WHERE conversation_id=? AND role='assistant'")
+  .get(gConvId).n;
+ok(assistantCount === 4, `群聊共 4 条角色回复（实际 ${assistantCount}）`);
+
+// 清理群聊
+db.prepare("DELETE FROM messages WHERE conversation_id=?").run(gConvId);
+db.prepare("DELETE FROM conv_members WHERE conversation_id=?").run(gConvId);
+db.prepare("DELETE FROM conversations WHERE id=?").run(gConvId);
+
 /* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(convId);

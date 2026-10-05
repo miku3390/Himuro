@@ -15,6 +15,7 @@ export default function HomePage() {
       mode: conversations.mode,
       tier: conversations.tier,
       chapter: conversations.chapter,
+      groupStrategy: conversations.groupStrategy,
       updatedAt: conversations.updatedAt,
       characterName: characters.name,
       characterEmoji: characters.emoji,

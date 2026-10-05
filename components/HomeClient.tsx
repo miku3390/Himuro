@@ -3,8 +3,8 @@
 import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createConversation, deleteConversation, duplicateCharacter } from "@/lib/actions";
-import { MODE_LABEL, TIER_LABEL, type CharacterCard, type Mode } from "@/lib/types";
+import { createConversation, createGroupConversation, deleteConversation, duplicateCharacter } from "@/lib/actions";
+import { GROUP_STRATEGY_LABEL, MODE_LABEL, TIER_LABEL, type CharacterCard, type GroupStrategy, type Mode } from "@/lib/types";
 import { badge, btnGhost, btnPrimary, card } from "@/lib/ui";
 
 type ConvRow = {
@@ -13,6 +13,7 @@ type ConvRow = {
   mode: string;
   tier: string;
   chapter: number;
+  groupStrategy: string | null;
   updatedAt: number;
   characterName: string;
   characterEmoji: string;
@@ -32,6 +33,9 @@ export default function HomeClient({
   const [pending, startTransition] = useTransition();
   const [charId, setCharId] = useState(myCharacters[0]?.id ?? "");
   const [mode, setMode] = useState<Mode>("daily");
+  const [groupMode, setGroupMode] = useState(false);
+  const [groupPicks, setGroupPicks] = useState<string[]>([]);
+  const [strategy, setStrategy] = useState<GroupStrategy>("mention");
   const [error, setError] = useState("");
 
   function start(withCharId: string, withMode: Mode) {
@@ -46,16 +50,103 @@ export default function HomeClient({
     });
   }
 
+  function startGroup() {
+    setError("");
+    startTransition(async () => {
+      try {
+        const { id } = await createGroupConversation(groupPicks, strategy);
+        router.push(`/chat/${id}`);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    });
+  }
+
   return (
     <div className="flex flex-col gap-6">
       {/* 新建会话 */}
       <section className={card + " p-5"}>
-        <h2 className="mb-4 text-base font-semibold">开一场新对话</h2>
+        <div className="mb-4 flex items-center">
+          <h2 className="text-base font-semibold">开一场新对话</h2>
+          <div className="ml-auto flex gap-1 text-xs">
+            <button
+              className={
+                "rounded-lg px-3 py-1.5 transition " +
+                (!groupMode ? "bg-indigo-600 text-white" : "text-zinc-500 hover:bg-zinc-100")
+              }
+              onClick={() => setGroupMode(false)}
+            >
+              单聊
+            </button>
+            <button
+              className={
+                "rounded-lg px-3 py-1.5 transition " +
+                (groupMode ? "bg-indigo-600 text-white" : "text-zinc-500 hover:bg-zinc-100")
+              }
+              onClick={() => setGroupMode(true)}
+              disabled={myCharacters.length < 2}
+              title={myCharacters.length < 2 ? "群聊至少需要 2 个角色" : undefined}
+            >
+              群聊
+            </button>
+          </div>
+        </div>
         {myCharacters.length === 0 ? (
           <p className="text-sm text-zinc-500">
             还没有自己的角色。可以先在下方「模板角色中心」试聊或复制一张卡，
             或到 <Link href="/characters" className="text-indigo-600 hover:underline">角色页</Link> 新建。
           </p>
+        ) : groupMode ? (
+          <div className="flex flex-col gap-4">
+            <div>
+              <label className="mb-2 block text-xs font-medium text-zinc-500">
+                选择成员（至少 2 个，已选 {groupPicks.length}）
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {myCharacters.map((c) => {
+                  const picked = groupPicks.includes(c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      className={
+                        "rounded-full px-3 py-1.5 text-sm transition " +
+                        (picked ? "bg-indigo-600 text-white" : "border border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300")
+                      }
+                      onClick={() =>
+                        setGroupPicks((p) => (picked ? p.filter((x) => x !== c.id) : [...p, c.id]))
+                      }
+                    >
+                      {c.emoji} {c.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-zinc-500">发言策略</label>
+                <select
+                  className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+                  value={strategy}
+                  onChange={(e) => setStrategy(e.target.value as GroupStrategy)}
+                >
+                  {(Object.keys(GROUP_STRATEGY_LABEL) as GroupStrategy[]).map((s) => (
+                    <option key={s} value={s}>
+                      {GROUP_STRATEGY_LABEL[s]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button className={btnPrimary} disabled={pending || groupPicks.length < 2} onClick={startGroup}>
+                开始群聊 →
+              </button>
+            </div>
+            <p className="text-xs text-zinc-400">
+              {strategy === "mention" && "谁被@谁答：消息里写到谁的名字，谁就回应；没人被点名则轮换下一位。"}
+              {strategy === "rotate" && "依次发言：每轮只有一位成员回应，按成员顺序循环。"}
+              {strategy === "all" && "全员发言：每位成员都会依次回应同一条消息（角色多时消耗更大）。"}
+            </p>
+          </div>
         ) : (
           <div className="flex flex-col gap-4 md:flex-row md:items-end">
             <div className="flex-1">
@@ -100,11 +191,13 @@ export default function HomeClient({
             </button>
           </div>
         )}
-        <p className="mt-3 text-xs text-zinc-400">
-          {mode === "daily"
-            ? "日常聊天：短提示 + 情绪目标（安慰 / 斗嘴 / 并肩作战…），每轮都可换基调。"
-            : "连载剧情：状态可追踪，章末自动写「下一章钩子」，关键事件可一键回写世界书。"}
-        </p>
+        {!groupMode && myCharacters.length > 0 && (
+          <p className="mt-3 text-xs text-zinc-400">
+            {mode === "daily"
+              ? "日常聊天：短提示 + 情绪目标（安慰 / 斗嘴 / 并肩作战…），每轮都可换基调。"
+              : "连载剧情：状态可追踪，章末自动写「下一章钩子」，关键事件可一键回写世界书。"}
+          </p>
+        )}
         {error && <p className="mt-2 text-sm text-red-500">{error}</p>}
       </section>
 
@@ -131,6 +224,11 @@ export default function HomeClient({
                 <Link href={`/chat/${c.id}`} className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{c.title}</div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
+                    {c.groupStrategy && (
+                      <span className={badge + " bg-violet-50 text-violet-600"}>
+                        群聊·{GROUP_STRATEGY_LABEL[c.groupStrategy as GroupStrategy]}
+                      </span>
+                    )}
                     <span className={badge + " bg-indigo-50 text-indigo-600"}>
                       {c.mode === "story" ? MODE_LABEL.story : MODE_LABEL.daily}
                     </span>
