@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
+  deleteMessage,
+  editUserMessageAndTruncate,
   saveEntryForCharacter,
   toggleStar,
   updateConversation,
@@ -33,6 +35,11 @@ type Conv = {
 type Hit = { category: string; title: string; weight: number };
 type Draft = { category: string; title: string; content: string; keywords: string[]; weight: number };
 
+function lastAssistantId(list: Msg[]): string | null {
+  for (let i = list.length - 1; i >= 0; i--) if (list[i].role === "assistant") return list[i].id;
+  return null;
+}
+
 export default function ChatRoom({
   conversation,
   character,
@@ -53,6 +60,8 @@ export default function ChatRoom({
   const [hook, setHook] = useState("");
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
   const [notice, setNotice] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
   const [pending, startTransition] = useTransition();
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -65,35 +74,29 @@ export default function ChatRoom({
     setTimeout(() => setNotice(""), 2500);
   }
 
-  /* ------------------------------- 发送消息 ------------------------------- */
-  async function send() {
-    const content = inputVal.trim();
-    if (!content || busy) return;
+  /* ---------------------------- SSE 流式公共流程 ---------------------------- */
+  async function runStream(
+    payload: { content?: string; emotion?: string | null; reroll?: boolean; rerollMessageId?: string },
+  ): Promise<{ messageId: string; userMessageId?: string; text: string; summary?: string }> {
     setBusy(true);
-    setInputVal("");
-    setMsgs((m) => [
-      ...m,
-      { id: "tmp-user", role: "user", content, emotion, starred: false },
-    ]);
-
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ conversationId: conv.id, content, emotion }),
+        body: JSON.stringify({ conversationId: conv.id, ...payload }),
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({ error: "请求失败" }));
         throw new Error(err.error ?? `HTTP ${res.status}`);
       }
-
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
       let acc = "";
+      let done: { messageId: string; userMessageId?: string; summary?: string } | null = null;
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        const { done: eof, value } = await reader.read();
+        if (eof) break;
         buf += decoder.decode(value, { stream: true });
         const blocks = buf.split("\n\n");
         buf = blocks.pop() ?? "";
@@ -107,24 +110,89 @@ export default function ChatRoom({
             acc += evt.v;
             setStreaming(acc);
           } else if (evt.t === "done") {
-            setMsgs((m) => [
-              ...m.map((x) => (x.id === "tmp-user" ? { ...x, id: `u-${Date.now()}` } : x)),
-              { id: evt.messageId, role: "assistant", content: acc, emotion: null, starred: false },
-            ]);
-            setStreaming("");
-            if (evt.summary) setSummary(evt.summary);
+            done = evt;
           } else if (evt.t === "err") {
             throw new Error(evt.message);
           }
         }
       }
+      if (!done) throw new Error("回复流中断");
+      return { messageId: done.messageId, userMessageId: done.userMessageId as string | undefined, text: acc, summary: done.summary };
+    } finally {
+      setStreaming("");
+      setBusy(false);
+    }
+  }
+
+  /* ------------------------------- 发送消息 ------------------------------- */
+  async function send() {
+    const content = inputVal.trim();
+    if (!content || busy) return;
+    setInputVal("");
+    const tmpId = `tmp-user-${Date.now()}`;
+    setMsgs((m) => [...m, { id: tmpId, role: "user", content, emotion, starred: false }]);
+    try {
+      const r = await runStream({ content, emotion });
+      setMsgs((m) => [
+        ...m.map((x) =>
+          x.id === tmpId ? { ...x, id: r.userMessageId ?? `u-${Date.now()}` } : x,
+        ),
+        { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false },
+      ]);
+      if (r.summary) setSummary(r.summary);
     } catch (e) {
       flash(e instanceof Error ? e.message : String(e));
-      setStreaming("");
-    } finally {
-      setBusy(false);
-      setEmotion(null);
+      // 保留用户消息，只是没有回复
+      setMsgs((m) => m.map((x) => (x.id === tmpId ? { ...x, id: `u-${Date.now()}` } : x)));
     }
+    setEmotion(null);
+  }
+
+  /* ------------------------- 重Roll：重新生成回复 ------------------------- */
+  async function reroll(messageId?: string) {
+    if (busy) return;
+    const target = messageId ?? lastAssistantId(msgs);
+    if (!target) return;
+    setMsgs((m) => m.filter((x) => x.id !== target)); // 乐观移除旧回复
+    try {
+      const r = await runStream({ reroll: true, rerollMessageId: target });
+      setMsgs((m) => [...m, { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false }]);
+      if (r.summary) setSummary(r.summary);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "重Roll失败");
+    }
+  }
+
+  /* ---------------------- 编辑用户消息 → 截断 → 重生成 ---------------------- */
+  function startEdit(m: Msg) {
+    setEditingId(m.id);
+    setEditText(m.content);
+  }
+
+  async function saveEdit() {
+    if (!editingId || busy) return;
+    const id = editingId;
+    setEditingId(null);
+    try {
+      await editUserMessageAndTruncate(id, editText);
+      // UI 同步：保留到被编辑消息为止，其后全部移除
+      const idx = msgs.findIndex((x) => x.id === id);
+      setMsgs((m) => [
+        ...m.slice(0, idx).map((x) => (x.id === id ? { ...x, content: editText.trim() } : x)),
+        { ...m[idx], content: editText.trim() },
+      ]);
+      const r = await runStream({ reroll: true }); // 末尾是刚编辑的用户消息，服务端直接续写
+      setMsgs((m) => [...m, { id: r.messageId, role: "assistant", content: r.text, emotion: null, starred: false }]);
+      if (r.summary) setSummary(r.summary);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "编辑失败");
+    }
+  }
+
+  function removeMsg(id: string) {
+    if (!confirm("删除这条消息？（它生成的记忆向量会一并删除）")) return;
+    setMsgs((m) => m.filter((x) => x.id !== id));
+    startTransition(() => deleteMessage(id));
   }
 
   /* ------------------------------ 会话级切换 ------------------------------ */
@@ -189,6 +257,8 @@ export default function ChatRoom({
   }
 
   /* -------------------------------- 渲染 -------------------------------- */
+  const lastAssistant = lastAssistantId(msgs);
+
   return (
     <div className="flex min-h-[calc(100vh-7.5rem)] flex-col gap-3 lg:flex-row">
       {/* 主聊天列 */}
@@ -246,67 +316,105 @@ export default function ChatRoom({
         {/* 消息列表 */}
         <div className={card + " mt-3 flex flex-1 flex-col overflow-y-auto p-4"}>
           <div className="flex flex-col gap-4">
-            {msgs.map((m) => (
-              <div key={m.id} className={"flex " + (m.role === "user" ? "justify-end" : "justify-start")}>
-                <div className={"max-w-[85%] " + (m.role === "user" ? "text-right" : "")}>
-                  {m.emotion && (
-                    <span className={badge + " mb-1 bg-pink-50 text-pink-500"}>目标：{m.emotion}</span>
-                  )}
-                  <div
-                    className={
-                      "inline-block whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-left text-sm leading-relaxed " +
-                      (m.role === "user"
-                        ? "bg-indigo-600 text-white"
-                        : "bg-zinc-100 text-zinc-800")
-                    }
-                  >
-                    {m.content}
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
-                    <button
-                      className={m.starred ? "text-amber-500" : "hover:text-amber-500"}
-                      title="复盘星标：标出满意的回复"
-                      onClick={() => {
-                        setMsgs((list) => list.map((x) => (x.id === m.id ? { ...x, starred: !x.starred } : x)));
-                        startTransition(() => toggleStar(m.id));
-                      }}
-                    >
-                      ★ {m.starred ? "已标" : "星标"}
-                    </button>
-                    <button className="hover:text-zinc-700" onClick={() => navigator.clipboard.writeText(m.content)}>
-                      复制
-                    </button>
-                    <button
-                      className="hover:text-indigo-500"
-                      onClick={() => {
-                        stopSpeak();
-                        speak(m.content, {
-                          rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
-                          pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
-                          voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
-                        });
-                      }}
-                    >
-                      ▶ 试听
-                    </button>
-                    {m.role === "assistant" && (
-                      <button
-                        className="hover:text-emerald-600"
-                        title="把这条回复连同你的上一句话存进角色卡示例对话（复盘回写）"
-                        onClick={() =>
-                          startTransition(async () => {
-                            await writeBackExample(m.id);
-                            flash("已回写进角色卡示例对话");
-                          })
+            {msgs.map((m) => {
+              const isEditing = editingId === m.id;
+              return (
+                <div key={m.id} className={"flex " + (m.role === "user" ? "justify-end" : "justify-start")}>
+                  <div className={"max-w-[85%] " + (m.role === "user" ? "text-right" : "")}>
+                    {m.emotion && (
+                      <span className={badge + " mb-1 bg-pink-50 text-pink-500"}>目标：{m.emotion}</span>
+                    )}
+                    {isEditing ? (
+                      <div className="text-left">
+                        <textarea
+                          className="w-full rounded-2xl border border-indigo-300 bg-white px-4 py-2.5 text-sm leading-relaxed outline-none focus:ring-2 focus:ring-indigo-100"
+                          value={editText}
+                          onChange={(e) => setEditText(e.target.value)}
+                          rows={3}
+                          autoFocus
+                        />
+                        <div className="mt-1 flex justify-end gap-2">
+                          <button className={btnGhost + " text-xs"} onClick={() => setEditingId(null)}>
+                            取消
+                          </button>
+                          <button className={btnPrimary + " text-xs"} disabled={busy || !editText.trim()} onClick={saveEdit}>
+                            保存并重新生成
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={
+                          "inline-block whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-left text-sm leading-relaxed " +
+                          (m.role === "user"
+                            ? "bg-indigo-600 text-white"
+                            : "bg-zinc-100 text-zinc-800")
                         }
                       >
-                        ↩ 存为示例
-                      </button>
+                        {m.content}
+                      </div>
+                    )}
+                    {!isEditing && (
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                        <button
+                          className={m.starred ? "text-amber-500" : "hover:text-amber-500"}
+                          title="复盘星标：标出满意的回复"
+                          onClick={() => {
+                            setMsgs((list) => list.map((x) => (x.id === m.id ? { ...x, starred: !x.starred } : x)));
+                            startTransition(() => toggleStar(m.id));
+                          }}
+                        >
+                          ★ {m.starred ? "已标" : "星标"}
+                        </button>
+                        <button className="hover:text-zinc-700" onClick={() => navigator.clipboard.writeText(m.content)}>
+                          复制
+                        </button>
+                        <button
+                          className="hover:text-indigo-500"
+                          onClick={() => {
+                            stopSpeak();
+                            speak(m.content, {
+                              rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
+                              pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
+                              voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
+                            });
+                          }}
+                        >
+                          ▶ 试听
+                        </button>
+                        {m.role === "user" && (
+                          <button className="hover:text-indigo-500" onClick={() => startEdit(m)}>
+                            ✎ 编辑
+                          </button>
+                        )}
+                        {m.role === "assistant" && m.id === lastAssistant && (
+                          <button className="hover:text-indigo-500" disabled={busy} onClick={() => reroll(m.id)}>
+                            ↻ 重Roll
+                          </button>
+                        )}
+                        {m.role === "assistant" && (
+                          <button
+                            className="hover:text-emerald-600"
+                            title="把这条回复连同你的上一句话存进角色卡示例对话（复盘回写）"
+                            onClick={() =>
+                              startTransition(async () => {
+                                await writeBackExample(m.id);
+                                flash("已回写进角色卡示例对话");
+                              })
+                            }
+                          >
+                            ↩ 存为示例
+                          </button>
+                        )}
+                        <button className="hover:text-red-500" onClick={() => removeMsg(m.id)}>
+                          🗑
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             {streaming && (
               <div className="flex justify-start">
                 <div className="himuro-caret inline-block max-w-[85%] whitespace-pre-wrap rounded-2xl bg-zinc-100 px-4 py-2.5 text-left text-sm leading-relaxed text-zinc-800">

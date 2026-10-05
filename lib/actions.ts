@@ -16,7 +16,6 @@ import {
   parseExamples,
   type CharacterCard,
   type Example,
-  type HimuroCardFile,
   type Mode,
   type Tier,
   type WbCategory,
@@ -128,37 +127,6 @@ export async function duplicateCharacter(id: string): Promise<{ id: string }> {
   }
   revalidatePath("/characters");
   return { id: newId };
-}
-
-/** 导入 Himuro 卡 JSON 文本 */
-export async function importCharacter(jsonText: string): Promise<{ id: string }> {
-  let parsed: HimuroCardFile;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch {
-    throw new Error("不是合法的 JSON 文件");
-  }
-  if (parsed?.format !== "himuro-card" || !parsed?.card) {
-    throw new Error("不是 Himuro 角色卡文件（缺少 format 标识）");
-  }
-  const c = parsed.card;
-  const { id } = await createCharacter(
-    {
-      name: c.name,
-      emoji: c.emoji || "🙂",
-      color: c.color || "#6366f1",
-      identity: c.identity || "",
-      speechStyle: c.speechStyle || "",
-      values: c.values || "",
-      boundaries: c.boundaries || "",
-      userAddressing: c.userAddressing || "",
-      relationship: c.relationship || "",
-      firstMessage: c.firstMessage || "",
-      examples: Array.isArray(c.examples) ? c.examples : [],
-    },
-    true,
-  );
-  return { id };
 }
 
 /* ================================ 世界书 ================================ */
@@ -377,6 +345,54 @@ export async function toggleStar(messageId: string) {
     .set({ starred: m.starred === 1 ? 0 : 1 })
     .where(eq(messagesTable.id, messageId))
     .run();
+}
+
+/** 删除单条消息（含其向量块）；idx 出现空洞不影响排序 */
+export async function deleteMessage(messageId: string) {
+  const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
+  if (!m) return;
+  const { msgChunks } = await import("@/lib/db/schema");
+  db.delete(msgChunks).where(eq(msgChunks.messageId, messageId)).run();
+  db.delete(messagesTable).where(eq(messagesTable.id, messageId)).run();
+}
+
+/**
+ * 编辑用户消息并截断其后所有消息（分叉的简化形态）。
+ * 返回 conversationId，客户端随后对末尾发起重Roll 重新生成回复。
+ */
+export async function editUserMessageAndTruncate(
+  messageId: string,
+  newContent: string,
+): Promise<{ conversationId: string }> {
+  const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
+  if (!m) throw new Error("消息不存在");
+  if (m.role !== "user") throw new Error("只能编辑用户消息");
+  const content = newContent.trim();
+  if (!content) throw new Error("内容不能为空");
+
+  const { msgChunks } = await import("@/lib/db/schema");
+  // 按 idx 删除该消息之后的所有消息（含向量块）
+  const rows = db
+    .select({ id: messagesTable.id, idx: messagesTable.idx })
+    .from(messagesTable)
+    .where(eq(messagesTable.conversationId, m.conversationId))
+    .all();
+  for (const r of rows) {
+    if (r.idx > m.idx) {
+      db.delete(msgChunks).where(eq(msgChunks.messageId, r.id)).run();
+      db.delete(messagesTable).where(eq(messagesTable.id, r.id)).run();
+    }
+  }
+  db.update(messagesTable)
+    .set({ content })
+    .where(eq(messagesTable.id, messageId))
+    .run();
+  db.update(conversations)
+    .set({ updatedAt: now() })
+    .where(eq(conversations.id, m.conversationId))
+    .run();
+  revalidatePath(`/chat/${m.conversationId}`);
+  return { conversationId: m.conversationId };
 }
 
 /** 复盘回写：把某条满意回复 + 它前面的用户输入，存进角色卡示例对话 */

@@ -3,7 +3,7 @@
 import { useRef, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createCharacter, deleteCharacter, duplicateCharacter, importCharacter } from "@/lib/actions";
+import { createCharacter, deleteCharacter, duplicateCharacter } from "@/lib/actions";
 import { card, btnGhost, btnPrimary, badge } from "@/lib/ui";
 import type { CharacterCard } from "@/lib/types";
 
@@ -43,18 +43,18 @@ export default function CharactersClient({
   }
 
   function onImportFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      startTransition(async () => {
-        try {
-          const { id } = await importCharacter(String(reader.result));
-          router.push(`/characters/${id}`);
-        } catch (e) {
-          alert(e instanceof Error ? e.message : "导入失败");
-        }
-      });
-    };
-    reader.readAsText(file, "utf-8");
+    startTransition(async () => {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/import/card", { method: "POST", body: fd });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        router.push(`/characters/${json.id}`);
+      } catch (e) {
+        alert(e instanceof Error ? e.message : "导入失败");
+      }
+    });
   }
 
   const grid = (list: Row[], isTemplate: boolean) => (
@@ -132,7 +132,7 @@ export default function CharactersClient({
           <input
             ref={fileRef}
             type="file"
-            accept="application/json,.json"
+            accept=".png,.json,application/json,image/png"
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -140,7 +140,7 @@ export default function CharactersClient({
               e.target.value = "";
             }}
           />
-          <button className={btnGhost} disabled={pending} onClick={() => fileRef.current?.click()}>
+          <button className={btnGhost} disabled={pending} onClick={() => fileRef.current?.click()} title="支持 SillyTavern PNG 卡 / V1V2V3 JSON 卡 / Himuro 卡">
             导入角色卡
           </button>
           <button className={btnPrimary} disabled={pending} onClick={createBlank}>

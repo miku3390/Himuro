@@ -1,7 +1,14 @@
-// 冒烟测试：建临时会话 → 调 /api/chat SSE → 校验事件流 → 清理
+// 冒烟测试：建临时会话 → 聊天 SSE → 重Roll → ST卡导入 → 校验 → 清理
 import Database from "better-sqlite3";
 
 const db = new Database("data/himuro.db");
+let failed = 0;
+const ok = (cond, label) => {
+  console.log((cond ? "✓ " : "✗ ") + label);
+  if (!cond) failed++;
+};
+
+/* ---------- 1. 聊天 SSE ---------- */
 const char = db.prepare("SELECT * FROM characters WHERE name='小满'").get();
 const convId = crypto.randomUUID();
 const now = Date.now();
@@ -9,37 +16,94 @@ db.prepare(
   "INSERT INTO conversations (id, character_id, title, mode, tier, chapter, summary_text, summarized_count, created_at, updated_at) VALUES (?,?,?,?,?,1,'',0,?,?)",
 ).run(convId, char.id, "冒烟测试 · 日常", "daily", "light", now, now);
 
-const res = await fetch("http://localhost:3000/api/chat", {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    conversationId: convId,
-    content: "周六去海边看日出的事情还作数吗？",
-    emotion: "安慰",
-  }),
-});
-console.log("HTTP", res.status, res.headers.get("content-type"));
+async function chat(payload) {
+  const res = await fetch("http://localhost:3000/api/chat", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ conversationId: convId, ...payload }),
+  });
+  const text = await res.text();
+  const events = text.split("\n\n").filter(Boolean).map((b) => JSON.parse(b.trim().slice(5)));
+  return { res, events };
+}
 
-const text = await res.text();
-const events = text
-  .split("\n\n")
-  .filter(Boolean)
-  .map((b) => JSON.parse(b.trim().slice(5)));
-const kinds = events.map((e) => e.t);
-const tokens = events
-  .filter((e) => e.t === "tok")
-  .map((e) => e.v)
-  .join("");
-console.log("事件序列:", [...new Set(kinds)].join(" → "));
-console.log("hits:", JSON.stringify(events.find((e) => e.t === "hits")?.hits));
-console.log("回复全文:", tokens.slice(0, 120).replace(/\n/g, " "));
-console.log("done 事件:", JSON.stringify(events.find((e) => e.t === "done")));
+const first = await chat({ content: "周六去海边看日出的事情还作数吗？", emotion: "安慰" });
+const kinds = [...new Set(first.events.map((e) => e.t))];
+const hits = first.events.find((e) => e.t === "hits")?.hits ?? [];
+const reply1 = first.events.find((e) => e.t === "done");
+ok(first.res.status === 200, "聊天 HTTP 200");
+ok(kinds.join("→") === "hits→tok→done", `事件序列 hits→tok→done（实际 ${kinds.join("→")}）`);
+ok(hits.some((h) => h.title === "周六看海的约定"), "世界书命中「周六看海的约定」");
+ok(!!reply1?.messageId, "回复落库");
 
-const msgCount = db
-  .prepare("SELECT count(*) n FROM messages WHERE conversation_id=?")
-  .get(convId).n;
-console.log("落库消息数(应为3: 开场白+用户+回复):", msgCount);
+const count1 = () => db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(convId).n;
+ok(count1() === 2, `消息数=2（实际 ${count1()}）`);
 
+/* ---------- 2. 重Roll ---------- */
+const reroll = await chat({ reroll: true, rerollMessageId: reply1.messageId });
+const reply2 = reroll.events.find((e) => e.t === "done");
+ok(reroll.res.status === 200 && !!reply2?.messageId, "重Roll 成功返回新回复");
+ok(reply2.messageId !== reply1.messageId, "重Roll 产生了新消息 id");
+const oldGone = db.prepare("SELECT count(*) n FROM messages WHERE id=?").get(reply1.messageId).n;
+ok(oldGone === 0, "旧回复已被删除");
+ok(count1() === 2, `重Roll 后消息数仍=2（实际 ${count1()}）`);
+
+/* ---------- 3. SillyTavern PNG 卡导入 ---------- */
+const stCard = {
+  spec: "chara_card_v2",
+  spec_version: "2.0",
+  data: {
+    name: "星霜",
+    description: "{{char}}是一位剑修，冷面热心。",
+    personality: "寡言，句短，涉及旧事会沉默。",
+    scenario: "与{{user}}在雪夜的山道相遇。",
+    first_mes: "{{char}}拂去肩上的雪：「阁下也是来避雪的？」",
+    mes_example:
+      "<START>\n{{user}}: 你冷吗？\n{{char}}: 尚可。\n<START>\n{{user}}: 走吧。\n{{char}}: 嗯。前面就是山神庙。",
+  },
+};
+function makePngCard(cardJson) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    return Buffer.concat([len, Buffer.from(type, "latin1"), data, Buffer.alloc(4)]);
+  };
+  const textData = Buffer.concat([
+    Buffer.from("chara", "latin1"),
+    Buffer.alloc(1),
+    Buffer.from(Buffer.from(JSON.stringify(cardJson)).toString("base64"), "latin1"),
+  ]);
+  return Buffer.concat([sig, chunk("IHDR", Buffer.alloc(13)), chunk("tEXt", textData), chunk("IEND", Buffer.alloc(0))]);
+}
+
+const fd = new FormData();
+fd.append("file", new Blob([makePngCard(stCard)], { type: "image/png" }), "card.png");
+const impRes = await fetch("http://localhost:3000/api/import/card", { method: "POST", body: fd });
+const imp = await impRes.json();
+ok(impRes.ok && imp.name === "星霜", `PNG 卡导入成功（${JSON.stringify(imp)}）`);
+
+const impRow = imp.id ? db.prepare("SELECT * FROM characters WHERE id=?").get(imp.id) : null;
+ok(impRow?.identity === "星霜是一位剑修，冷面热心。", "description 宏已替换并映射到 identity");
+ok((impRow?.first_message ?? "").includes("星霜拂去肩上的雪"), "first_mes 宏已替换");
+const impExamples = JSON.parse(impRow?.examples_json ?? "[]");
+ok(impExamples.length === 2 && impExamples[0].user === "你冷吗？", `mes_example 解析出 2 组示例（实际 ${impExamples.length}）`);
+
+const impWb = imp.id ? db.prepare("SELECT id FROM worldbooks WHERE character_id=?").get(imp.id) : null;
+ok(!!impWb, "导入角色自动建了世界书");
+
+/* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(convId);
-console.log("临时会话已清理");
+if (imp.id) {
+  db.prepare("DELETE FROM wb_entries WHERE worldbook_id=?").run(impWb.id);
+  db.prepare("DELETE FROM worldbooks WHERE id=?").run(impWb.id);
+  db.prepare("DELETE FROM characters WHERE id=?").run(imp.id);
+}
+console.log("临时数据已清理");
+
+if (failed) {
+  console.error(`${failed} 项未通过`);
+  process.exit(1);
+}
+console.log("全部通过 ✅");

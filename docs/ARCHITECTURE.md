@@ -12,8 +12,9 @@ Next.js 16 单进程（App Router）
   ├── app/characters/…             角色列表 / 编辑器
   ├── app/worldbooks/[id]/page.tsx 世界书管理（路由按角色 ID，1:1）
   ├── app/settings/page.tsx        设置
-  ├── app/api/chat/route.ts        聊天 SSE 流式接口（核心）
+  ├── app/api/chat/route.ts        聊天 SSE 流式接口（核心；支持 reroll 重Roll）
   ├── app/api/export/route.ts      导出 TXT/JSON
+  ├── app/api/import/card/route.ts 角色卡导入（SillyTavern PNG/V1V2V3 JSON/Himuro 卡）
   └── lib/
       ├── db/schema.ts             Drizzle 表定义（唯一 schema 源）
       ├── db/index.ts              SQLite 单例 + 启动时自动迁移 + 种子
@@ -21,6 +22,7 @@ Next.js 16 单进程（App Router）
       ├── prompt.ts                Prompt 组装（纯函数，可单测）
       ├── memory.ts                三层记忆引擎 + 世界书命中
       ├── llm.ts                   OpenAI 兼容客户端（流式/补全/Embedding）+ mock 演示模型
+      ├── stcard.ts                SillyTavern 卡解析（PNG tEXt chunk / V1V2V3 归一化 / 宏替换）
       ├── settings.ts              设置读写
       ├── story.ts                 连载任务（钩子/提炼）
       ├── actions.ts               全部 Server Actions（CRUD）
@@ -43,8 +45,10 @@ Next.js 16 单进程（App Router）
 ## 聊天一轮的完整流水线（app/api/chat/route.ts）
 
 ```
-POST {conversationId, content, emotion}
- 1. 用户消息入库
+POST {conversationId, content, emotion}            普通发送
+POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重新生成；
+                                                     末尾是用户消息时直接续写——编辑重发用）
+ 1. 用户消息入库（reroll 则改为删除被替换的回复，含向量块）
  2. 取最近 12 条原文（VERBATIM_WINDOW）
  3. matchWorldbook：最近 8 条做关键词扫描 → 权重 top6 条目
  4. searchVectorMemories：用户消息 Embedding → 余弦 top4（未配置则跳过）
@@ -52,7 +56,8 @@ POST {conversationId, content, emotion}
  6. streamChat：OpenAI 兼容 /chat/completions stream=true，逐 token SSE 下发
     └─ baseUrl === "mock" → 内置演示模型（离线）
  7. 完成后：assistant 消息入库 → 双条向量入库 → maybeUpdateSummary（该摘要则摘要）
- 8. SSE 事件：{t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"done"} 落库完成
+ 8. SSE 事件：{t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"done", messageId, userMessageId} 落库完成
+    └─ userMessageId 必须回传：前端用它替换乐观插入的临时消息 id，否则后续「编辑/删除」找不到消息
 ```
 
 客户端（components/ChatRoom.tsx）用 fetch + ReadableStream 解析 SSE，不依赖 EventSource（因为要 POST）。
