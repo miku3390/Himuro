@@ -99,7 +99,7 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
   发言人的 characterId（群聊里各角色各说各的声）。
 
 - 供应商参数存 `settings` 表（保存时同步 localStorage 供聊天页免查询读取）。
-- 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
+- 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重，**默认 GPT e20 + SoVITS e8**，用户 A/B 后选定，配置在 `~/GPT-SoVITS/GPT_SoVITS/configs/tts_infer.yaml`），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
 - 种子默认 provider=gptsovits 并预填扇的参考音频；服务未启动时试听会报错，可切回 browser。
 - Phase 3：按角色换参考音频（GPT-SoVITS 换 ref 即换音色）、批量导出、逐句高潮配音。
 
