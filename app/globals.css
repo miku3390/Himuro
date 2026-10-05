@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/* Himuro 全局样式：浅色主题 + 中文字体栈（不依赖在线字体，离线可用） */
+
+:root {
+  --background: #f4f4f5;
+  --foreground: #18181b;
+  --accent: #6366f1;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC",
+    "Noto Sans CJK SC", sans-serif;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+/* 聊天流式输出中的光标 */
+@keyframes himuro-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+.himuro-caret::after {
+  content: "▍";
+  margin-left: 1px;
+  animation: himuro-blink 0.9s infinite;
+  color: var(--accent);
+}
+
+/* 细滚动条 */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}

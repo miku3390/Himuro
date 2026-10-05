@@ -1,0 +1,439 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { and, eq } from "drizzle-orm";
+import { db } from "@/lib/db";
+import {
+  characters,
+  conversations,
+  messages as messagesTable,
+  wbEntries,
+  wbVersions,
+  worldbooks,
+} from "@/lib/db/schema";
+import { saveSettings, getSettings } from "@/lib/settings";
+import {
+  parseExamples,
+  type CharacterCard,
+  type Example,
+  type HimuroCardFile,
+  type Mode,
+  type Tier,
+  type WbCategory,
+} from "@/lib/types";
+
+/**
+ * 全部服务端 Actions（角色卡 / 世界书 / 会话 / 消息 / 设置）。
+ * 页面通过 `import { xxx } from "@/lib/actions"` 直接调用。
+ */
+
+const now = () => Date.now();
+const uid = () => crypto.randomUUID();
+
+/* ================================ 角色卡 ================================ */
+
+export type CharacterInput = Omit<
+  CharacterCard,
+  "id" | "isTemplate" | "examples"
+> & { examples: Example[] };
+
+function upsertCharacterValues(input: CharacterInput) {
+  return {
+    name: input.name.trim() || "未命名角色",
+    emoji: input.emoji || "🙂",
+    color: input.color || "#6366f1",
+    identity: input.identity,
+    speechStyle: input.speechStyle,
+    values: input.values,
+    boundaries: input.boundaries,
+    userAddressing: input.userAddressing,
+    relationship: input.relationship,
+    firstMessage: input.firstMessage,
+    examplesJson: JSON.stringify(input.examples.slice(0, 5)),
+  };
+}
+
+/** 新建角色（可选同时建世界书） */
+export async function createCharacter(
+  input: CharacterInput,
+  withWorldbook: boolean,
+): Promise<{ id: string }> {
+  const id = uid();
+  db.insert(characters)
+    .values({ id, ...upsertCharacterValues(input), isTemplate: 0, createdAt: now(), updatedAt: now() })
+    .run();
+  if (withWorldbook) {
+    db.insert(worldbooks)
+      .values({ id: uid(), characterId: id, name: `${input.name}的世界书`, createdAt: now() })
+      .run();
+  }
+  revalidatePath("/characters");
+  return { id };
+}
+
+export async function updateCharacter(id: string, input: CharacterInput) {
+  db.update(characters)
+    .set({ ...upsertCharacterValues(input), updatedAt: now() })
+    .where(eq(characters.id, id))
+    .run();
+  revalidatePath("/characters");
+  revalidatePath(`/characters/${id}`);
+}
+
+export async function deleteCharacter(id: string) {
+  db.delete(characters).where(eq(characters.id, id)).run();
+  // 级联清理（SQLite 未开外键，手动删）
+  const wbs = db.select().from(worldbooks).where(eq(worldbooks.characterId, id)).all();
+  for (const wb of wbs) {
+    db.delete(wbEntries).where(eq(wbEntries.worldbookId, wb.id)).run();
+    db.delete(wbVersions).where(eq(wbVersions.worldbookId, wb.id)).run();
+  }
+  db.delete(worldbooks).where(eq(worldbooks.characterId, id)).run();
+  const convs = db.select().from(conversations).where(eq(conversations.characterId, id)).all();
+  for (const c of convs) {
+    db.delete(messagesTable).where(eq(messagesTable.conversationId, c.id)).run();
+  }
+  db.delete(conversations).where(eq(conversations.characterId, id)).run();
+  revalidatePath("/characters");
+}
+
+/** 把模板角色复制为一张可编辑的新卡（含世界书与条目） */
+export async function duplicateCharacter(id: string): Promise<{ id: string }> {
+  const src = db.select().from(characters).where(eq(characters.id, id)).get();
+  if (!src) throw new Error("角色不存在");
+  const newId = uid();
+  db.insert(characters)
+    .values({
+      ...src,
+      id: newId,
+      name: `${src.name}（副本）`,
+      isTemplate: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    })
+    .run();
+
+  const srcWb = db.select().from(worldbooks).where(eq(worldbooks.characterId, id)).get();
+  if (srcWb) {
+    const newWbId = uid();
+    db.insert(worldbooks)
+      .values({ id: newWbId, characterId: newId, name: srcWb.name, createdAt: now() })
+      .run();
+    const entries = db.select().from(wbEntries).where(eq(wbEntries.worldbookId, srcWb.id)).all();
+    for (const e of entries) {
+      db.insert(wbEntries)
+        .values({ ...e, id: uid(), worldbookId: newWbId, createdAt: now(), updatedAt: now() })
+        .run();
+    }
+  }
+  revalidatePath("/characters");
+  return { id: newId };
+}
+
+/** 导入 Himuro 卡 JSON 文本 */
+export async function importCharacter(jsonText: string): Promise<{ id: string }> {
+  let parsed: HimuroCardFile;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new Error("不是合法的 JSON 文件");
+  }
+  if (parsed?.format !== "himuro-card" || !parsed?.card) {
+    throw new Error("不是 Himuro 角色卡文件（缺少 format 标识）");
+  }
+  const c = parsed.card;
+  const { id } = await createCharacter(
+    {
+      name: c.name,
+      emoji: c.emoji || "🙂",
+      color: c.color || "#6366f1",
+      identity: c.identity || "",
+      speechStyle: c.speechStyle || "",
+      values: c.values || "",
+      boundaries: c.boundaries || "",
+      userAddressing: c.userAddressing || "",
+      relationship: c.relationship || "",
+      firstMessage: c.firstMessage || "",
+      examples: Array.isArray(c.examples) ? c.examples : [],
+    },
+    true,
+  );
+  return { id };
+}
+
+/* ================================ 世界书 ================================ */
+
+/** 命中预览（世界书管理页调试用）：给定文本，看会命中哪些条目 */
+export async function previewWorldbookHitsAction(characterId: string, text: string) {
+  const { previewWorldbookHits } = await import("@/lib/memory");
+  const s = getSettings();
+  const hits = previewWorldbookHits(characterId, text, s.wbMaxHits);
+  return hits.map((h) => ({ category: h.category, title: h.title, weight: h.weight }));
+}
+
+/** 聊天页快捷保存：按角色找到其世界书（没有则建）直接写条目 */
+export async function saveEntryForCharacter(characterId: string, input: WbEntryInput) {
+  const wb = await ensureWorldbook(characterId);
+  await saveEntry(wb.id, input);
+}
+
+/** 确保角色有世界书，返回它（世界书页兜底用） */
+export async function ensureWorldbook(characterId: string) {
+  const existing = db.select().from(worldbooks).where(eq(worldbooks.characterId, characterId)).get();
+  if (existing) return existing;
+  const card = db.select().from(characters).where(eq(characters.id, characterId)).get();
+  const id = crypto.randomUUID();
+  db.insert(worldbooks)
+    .values({ id, characterId, name: `${card?.name ?? "角色"}的世界书`, createdAt: now() })
+    .run();
+  revalidatePath(`/worldbooks/${characterId}`);
+  return db.select().from(worldbooks).where(eq(worldbooks.id, id)).get()!;
+}
+
+export type WbEntryInput = {
+  id?: string;
+  category: WbCategory;
+  title: string;
+  content: string;
+  keywords: string[];
+  weight: number;
+  sort: number;
+  enabled: boolean;
+};
+
+function snapshotWorldbook(worldbookId: string, note: string) {
+  const entries = db
+    .select()
+    .from(wbEntries)
+    .where(eq(wbEntries.worldbookId, worldbookId))
+    .all();
+  db.insert(wbVersions)
+    .values({
+      id: uid(),
+      worldbookId,
+      note,
+      snapshotJson: JSON.stringify(entries),
+      createdAt: now(),
+    })
+    .run();
+  // 只保留最近 30 个版本
+  const versions = db
+    .select()
+    .from(wbVersions)
+    .where(eq(wbVersions.worldbookId, worldbookId))
+    .all();
+  if (versions.length > 30) {
+    const del = versions
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, versions.length - 30);
+    for (const v of del) db.delete(wbVersions).where(eq(wbVersions.id, v.id)).run();
+  }
+}
+
+/** 新建/更新条目；变更前自动做整本快照（可回滚） */
+export async function saveEntry(worldbookId: string, input: WbEntryInput) {
+  const before = db
+    .select({ title: wbEntries.title })
+    .from(wbEntries)
+    .where(eq(wbEntries.id, input.id ?? "__none__"))
+    .get();
+  snapshotWorldbook(worldbookId, before ? `修改条目「${before.title}」前` : "新增条目前");
+
+  if (input.id) {
+    db.update(wbEntries)
+      .set({
+        category: input.category,
+        title: input.title,
+        content: input.content,
+        keywordsJson: JSON.stringify(input.keywords),
+        weight: input.weight,
+        sort: input.sort,
+        enabled: input.enabled ? 1 : 0,
+        updatedAt: now(),
+      })
+      .where(eq(wbEntries.id, input.id))
+      .run();
+  } else {
+    db.insert(wbEntries)
+      .values({
+        id: uid(),
+        worldbookId,
+        category: input.category,
+        title: input.title,
+        content: input.content,
+        keywordsJson: JSON.stringify(input.keywords),
+        weight: input.weight,
+        sort: input.sort,
+        enabled: input.enabled ? 1 : 0,
+        createdAt: now(),
+        updatedAt: now(),
+      })
+      .run();
+  }
+  revalidatePath(`/worldbooks/${worldbookId}`);
+}
+
+export async function deleteEntry(worldbookId: string, entryId: string) {
+  const row = db.select({ title: wbEntries.title }).from(wbEntries).where(eq(wbEntries.id, entryId)).get();
+  snapshotWorldbook(worldbookId, `删除条目「${row?.title ?? entryId}」前`);
+  db.delete(wbEntries).where(eq(wbEntries.id, entryId)).run();
+  revalidatePath(`/worldbooks/${worldbookId}`);
+}
+
+/** 回滚到某个版本快照（回滚动作本身也会先存一份快照） */
+export async function rollbackWorldbook(worldbookId: string, versionId: string) {
+  const v = db.select().from(wbVersions).where(eq(wbVersions.id, versionId)).get();
+  if (!v) throw new Error("版本不存在");
+  snapshotWorldbook(worldbookId, `回滚前（自动保存）`);
+  const snapshot = JSON.parse(v.snapshotJson) as (typeof wbEntries.$inferSelect)[];
+  db.delete(wbEntries).where(eq(wbEntries.worldbookId, worldbookId)).run();
+  for (const e of snapshot) {
+    db.insert(wbEntries)
+      .values({ ...e, createdAt: now(), updatedAt: now() })
+      .run();
+  }
+  revalidatePath(`/worldbooks/${worldbookId}`);
+}
+
+/* ================================ 会话 ================================ */
+
+export async function createConversation(
+  characterId: string,
+  mode: Mode,
+): Promise<{ id: string }> {
+  const card = db.select().from(characters).where(eq(characters.id, characterId)).get();
+  if (!card) throw new Error("角色不存在");
+
+  const id = uid();
+  const modeLabel = mode === "story" ? "连载" : "日常";
+  db.insert(conversations)
+    .values({
+      id,
+      characterId,
+      title: `${card.name} · ${modeLabel}`,
+      mode,
+      tier: "light",
+      chapter: 1,
+      summaryText: "",
+      summarizedCount: 0,
+      createdAt: now(),
+      updatedAt: now(),
+    })
+    .run();
+
+  // 开场白作为第一条角色消息
+  if (card.firstMessage?.trim()) {
+    db.insert(messagesTable)
+      .values({
+        id: uid(),
+        conversationId: id,
+        idx: 0,
+        role: "assistant",
+        content: card.firstMessage,
+        createdAt: now(),
+      })
+      .run();
+  }
+  revalidatePath("/");
+  return { id };
+}
+
+export async function updateConversation(
+  id: string,
+  patch: { mode?: Mode; tier?: Tier; title?: string; chapter?: number },
+) {
+  // 默认标题跟随模式（「XX · 日常/连载」），用户改过标题则保持不动
+  if (patch.mode) {
+    const conv = db.select().from(conversations).where(eq(conversations.id, id)).get();
+    if (conv && (conv.title.endsWith(" · 日常") || conv.title.endsWith(" · 连载"))) {
+      const card = db
+        .select({ name: characters.name })
+        .from(characters)
+        .where(eq(characters.id, conv.characterId))
+        .get();
+      if (card) patch = { ...patch, title: `${card.name} · ${patch.mode === "story" ? "连载" : "日常"}` };
+    }
+  }
+  db.update(conversations)
+    .set({ ...patch, updatedAt: now() })
+    .where(eq(conversations.id, id))
+    .run();
+  revalidatePath("/");
+  revalidatePath(`/chat/${id}`);
+}
+
+export async function deleteConversation(id: string) {
+  db.delete(messagesTable).where(eq(messagesTable.conversationId, id)).run();
+  db.delete(conversations).where(eq(conversations.id, id)).run();
+  revalidatePath("/");
+}
+
+/* ================================ 消息 ================================ */
+
+export async function toggleStar(messageId: string) {
+  const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
+  if (!m) return;
+  db.update(messagesTable)
+    .set({ starred: m.starred === 1 ? 0 : 1 })
+    .where(eq(messagesTable.id, messageId))
+    .run();
+}
+
+/** 复盘回写：把某条满意回复 + 它前面的用户输入，存进角色卡示例对话 */
+export async function writeBackExample(messageId: string) {
+  const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
+  if (!m || m.role !== "assistant") throw new Error("只能回写角色回复");
+  const prev = db
+    .select()
+    .from(messagesTable)
+    .where(
+      and(eq(messagesTable.conversationId, m.conversationId), eq(messagesTable.idx, m.idx - 1)),
+    )
+    .get();
+
+  const conv = db.select().from(conversations).where(eq(conversations.id, m.conversationId)).get();
+  if (!conv) throw new Error("会话不存在");
+  const card = db.select().from(characters).where(eq(characters.id, conv.characterId)).get();
+  if (!card) throw new Error("角色不存在");
+
+  const examples = parseExamples(card.examplesJson);
+  examples.push({
+    user: prev?.role === "user" ? prev.content : "（用户未发言）",
+    assistant: m.content,
+  });
+  if (examples.length > 5) examples.shift(); // 风月口径：3-5 组
+  db.update(characters)
+    .set({ examplesJson: JSON.stringify(examples), updatedAt: now() })
+    .where(eq(characters.id, card.id))
+    .run();
+  revalidatePath(`/characters/${card.id}`);
+}
+
+/* ================================ 设置 ================================ */
+
+export async function saveSettingsAction(patch: Parameters<typeof saveSettings>[0]) {
+  saveSettings(patch);
+  revalidatePath("/settings");
+}
+
+/** 供设置页「测试连接」用：发一句 ping，返回首句或错误 */
+export async function testModelConfig(
+  tier: "light" | "quality",
+): Promise<{ ok: boolean; reply: string }> {
+  const s = getSettings();
+  const cfg = s[tier];
+  try {
+    const { chatComplete } = await import("@/lib/llm");
+    const reply = await chatComplete(
+      cfg,
+      [
+        { role: "system", content: "你是连接测试器，只回复四个字：连接正常" },
+        { role: "user", content: "ping" },
+      ],
+      { kind: "chat", characterName: "测试", userText: "ping" },
+    );
+    return { ok: true, reply: reply.slice(0, 50) };
+  } catch (err) {
+    return { ok: false, reply: err instanceof Error ? err.message : String(err) };
+  }
+}
