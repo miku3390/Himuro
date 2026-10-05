@@ -45,6 +45,11 @@ export type CharacterCard = {
   firstMessage: string;
   examples: Example[];
   isTemplate: boolean;
+  /** 角色级 TTS（自部署供应商）：留空回退到设置页全局配置 */
+  ttsRefAudio: string;
+  ttsPromptText: string;
+  ttsPromptLang: string;
+  ttsLang: string;
 };
 
 export type WbEntry = {

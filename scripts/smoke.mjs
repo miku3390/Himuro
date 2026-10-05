@@ -151,6 +151,31 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   const ct = ttsRes.headers.get("content-type") ?? "";
   const bytes = (await ttsRes.arrayBuffer()).byteLength;
   ok(ttsRes.ok && ct.startsWith("audio/") && bytes > 10000, `TTS 代理返回音频（${ct}, ${bytes} bytes）`);
+
+  // 角色级覆盖：建一个带扇参考音频的临时角色，带 characterId 请求应同样出音频
+  const ttsCharId = crypto.randomUUID();
+  db.prepare(
+    "INSERT INTO characters (id, name, identity, tts_ref_audio, tts_prompt_text, tts_prompt_lang, tts_lang, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?,?,0,?,?)",
+  ).run(
+    ttsCharId,
+    "TTS测试角色",
+    "测试用",
+    "/home/miku/GPT-SoVITS/GPT_SoVITS/output/切片/vocal_扇_原声.wav_20.wav_0000020800_0000234240.wav",
+    "しかしそれはともかくとして、あららぎ先輩、仲間を頼るのは悪いことではありませんが",
+    "ja",
+    "zh",
+    now,
+    now,
+  );
+  const ttsRes2 = await fetch("http://localhost:3000/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "角色级音色测试。", characterId: ttsCharId }),
+  });
+  const ct2 = ttsRes2.headers.get("content-type") ?? "";
+  const bytes2 = (await ttsRes2.arrayBuffer()).byteLength;
+  ok(ttsRes2.ok && ct2.startsWith("audio/") && bytes2 > 10000, `角色级 TTS 覆盖生效（${ct2}, ${bytes2} bytes）`);
+  db.prepare("DELETE FROM characters WHERE id=?").run(ttsCharId);
 }
 
 /* ---------- 清理 ---------- */

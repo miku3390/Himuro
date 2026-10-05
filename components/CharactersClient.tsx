@@ -35,6 +35,10 @@ export default function CharactersClient({
           relationship: "",
           firstMessage: "",
           examples: [],
+          ttsRefAudio: "",
+          ttsPromptText: "",
+          ttsPromptLang: "",
+          ttsLang: "",
         },
         true,
       );

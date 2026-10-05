@@ -35,11 +35,11 @@ export function getChineseVoices(): { uri: string; name: string }[] {
     .map((v) => ({ uri: v.voiceURI, name: `${v.name} (${v.lang})` }));
 }
 
-async function playServerTts(text: string): Promise<void> {
+async function playServerTts(text: string, characterId?: string): Promise<void> {
   const res = await fetch("/api/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, characterId }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
@@ -66,17 +66,17 @@ function playBrowserTts(text: string, opts: TtsOptions = {}) {
   speechSynthesis.speak(u);
 }
 
-/** 统一入口：按当前供应商朗读。返回 provider 便于 UI 提示 */
+/** 统一入口：按当前供应商朗读。characterId 传入时服务端优先用该角色自己的音色配置 */
 export async function speak(
   text: string,
-  opts: TtsOptions = {},
+  opts: TtsOptions & { characterId?: string } = {},
 ): Promise<"browser" | "server"> {
   const provider = currentProvider();
   if (provider === "browser") {
     playBrowserTts(text, opts);
     return "browser";
   }
-  await playServerTts(text);
+  await playServerTts(text, opts.characterId);
   return "server";
 }
 

@@ -36,6 +36,12 @@ export const characters = sqliteTable("characters", {
   firstMessage: text("first_message").notNull().default(""),
   /** 示例对话 [{ user, assistant }] x 3-5，锁定语感 */
   examplesJson: text("examples_json").notNull().default("[]"),
+  /** 角色级 TTS（自部署供应商用）：参考音频路径/prompt 文本与语言/合成语言。
+   *  留空 = 回退到设置页的全局配置 */
+  ttsRefAudio: text("tts_ref_audio").notNull().default(""),
+  ttsPromptText: text("tts_prompt_text").notNull().default(""),
+  ttsPromptLang: text("tts_prompt_lang").notNull().default(""),
+  ttsLang: text("tts_lang").notNull().default(""),
   /** 模板角色：只用来开新卡/试聊，不出现在普通列表 */
   isTemplate: integer("is_template").notNull().default(0),
   createdAt: integer("created_at").notNull(),

@@ -51,6 +51,10 @@ function upsertCharacterValues(input: CharacterInput) {
     relationship: input.relationship,
     firstMessage: input.firstMessage,
     examplesJson: JSON.stringify(input.examples.slice(0, 5)),
+    ttsRefAudio: input.ttsRefAudio ?? "",
+    ttsPromptText: input.ttsPromptText ?? "",
+    ttsPromptLang: input.ttsPromptLang ?? "",
+    ttsLang: input.ttsLang ?? "",
   };
 }
 

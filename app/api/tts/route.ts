@@ -1,3 +1,4 @@
+import { getCharacterCard } from "@/lib/memory";
 import { getSettings } from "@/lib/settings";
 
 export const runtime = "nodejs";
@@ -8,16 +9,32 @@ const TIMEOUT_MS = 240_000;
  * 自部署 TTS 代理：浏览器 → /api/tts → GPT-SoVITS / OpenAI 兼容服务。
  * 绕开 CORS，密钥/内网地址不出服务端。
  *
- * 请求：{ text: string }
+ * 请求：{ text, characterId? }
+ *   characterId 给定时优先用该角色自己的参考音频/语言配置（GPT-SoVITS 换 ref 即换音色），
+ *   角色没配的字段回退到设置页全局值。
  * 返回：audio/wav（gptsovits）或按供应商格式的音频字节流；provider=browser 返回 400。
  */
 export async function POST(req: Request) {
-  const body = (await req.json()) as { text?: string };
+  const body = (await req.json()) as { text?: string; characterId?: string };
   const text = (body.text ?? "").trim().slice(0, 1000);
   if (!text) return Response.json({ error: "缺少 text" }, { status: 400 });
 
   const s = getSettings();
-  const tts = s.tts;
+  let tts = { ...s.tts };
+
+  // 角色级覆盖（仅 GPT-SoVITS 链路有意义：参考音频即音色）
+  if (body.characterId) {
+    const card = getCharacterCard(body.characterId);
+    if (card) {
+      tts = {
+        ...tts,
+        refAudio: card.ttsRefAudio || tts.refAudio,
+        promptText: card.ttsPromptText || tts.promptText,
+        promptLang: card.ttsPromptLang || tts.promptLang,
+        lang: card.ttsLang || tts.lang,
+      };
+    }
+  }
 
   try {
     if (tts.provider === "gptsovits") {

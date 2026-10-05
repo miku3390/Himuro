@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createCharacter, updateCharacter } from "@/lib/actions";
+import { speak, stopSpeak } from "@/lib/tts";
 import type { CharacterCard, Example, HimuroCardFile } from "@/lib/types";
 import { btnGhost, btnPrimary, card, input, label, textarea } from "@/lib/ui";
 
@@ -25,6 +26,8 @@ export default function CharacterEditor({
   const [form, setForm] = useState(initial);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [ttsBusy, setTtsBusy] = useState(false);
+  const [ttsMsg, setTtsMsg] = useState("");
 
   const set = (key: keyof typeof form) => (v: string) => setForm((f) => ({ ...f, [key]: v }));
 
@@ -63,6 +66,10 @@ export default function CharacterEditor({
         relationship: form.relationship,
         firstMessage: form.firstMessage,
         examples: form.examples,
+        ttsRefAudio: form.ttsRefAudio,
+        ttsPromptText: form.ttsPromptText,
+        ttsPromptLang: form.ttsPromptLang,
+        ttsLang: form.ttsLang,
       },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -216,6 +223,66 @@ export default function CharacterEditor({
           {form.examples.length === 0 && (
             <p className="text-sm text-zinc-400">还没有示例。建议至少写 3 组，聊天页里也可把满意的对话一键回写成示例。</p>
           )}
+        </div>
+      </section>
+
+      {/* 角色语音 */}
+      <section className={card + " p-5"}>
+        <h2 className="mb-1 font-semibold">角色语音（可选）</h2>
+        <p className="mb-4 text-xs text-zinc-400">
+          供应商为 GPT-SoVITS 时，参考音频即音色：为本角色填一段 TA 的参考音频（服务端路径）即可专属声线；
+          留空则使用设置页的全局音色。浏览器内置语音不支持按角色区分。
+        </p>
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className={label}>参考音频路径（服务端文件路径，如 /home/miku/GPT-SoVITS/…/xxx.wav）</label>
+            <input className={input} value={form.ttsRefAudio} onChange={(e) => set("ttsRefAudio")(e.target.value)} />
+          </div>
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="md:col-span-2">
+              <label className={label}>参考音频说的话（prompt_text，日语/中文原文）</label>
+              <textarea className={textarea + " min-h-16"} value={form.ttsPromptText} onChange={(e) => set("ttsPromptText")(e.target.value)} />
+            </div>
+            <div className="flex flex-col gap-4">
+              <div>
+                <label className={label}>参考音频语言</label>
+                <input className={input} value={form.ttsPromptLang} onChange={(e) => set("ttsPromptLang")(e.target.value)} placeholder="ja / zh / en" />
+              </div>
+              <div>
+                <label className={label}>合成语言</label>
+                <input className={input} value={form.ttsLang} onChange={(e) => set("ttsLang")(e.target.value)} placeholder="zh / ja / en（留空=全局）" />
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className={btnGhost + " text-xs"}
+              disabled={ttsBusy || isNew}
+              title={isNew ? "先保存角色后再试听" : "先保存当前修改，再用该角色音色试听"}
+              onClick={async () => {
+                setTtsBusy(true);
+                setTtsMsg("");
+                try {
+                  // 先落库，确保服务端读到最新配置
+                  if (isNew) throw new Error("先保存角色后再试听");
+                  await updateCharacter(form.id, { ...form });
+                  stopSpeak();
+                  const used = await speak(`${form.name}的专属音色试听。这是从角色卡里发出的声音。`, {
+                    characterId: form.id,
+                  });
+                  setTtsMsg(used === "server" ? "已请求服务端合成" : "当前为浏览器内置语音，无法区分角色");
+                } catch (e) {
+                  setTtsMsg(e instanceof Error ? e.message : "TTS 失败");
+                } finally {
+                  setTtsBusy(false);
+                }
+              }}
+            >
+              ▶ 用此音色试听
+            </button>
+            {ttsBusy && <span className="text-xs text-zinc-400">合成中…</span>}
+            {ttsMsg && <span className="text-xs text-zinc-500">{ttsMsg}</span>}
+          </div>
         </div>
       </section>
     </div>

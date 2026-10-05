@@ -32,6 +32,10 @@ export default async function CharacterPage({
         relationship: row.relationship,
         firstMessage: row.firstMessage,
         examples: parseExamples(row.examplesJson),
+        ttsRefAudio: row.ttsRefAudio,
+        ttsPromptText: row.ttsPromptText,
+        ttsPromptLang: row.ttsPromptLang,
+        ttsLang: row.ttsLang,
       }}
       worldbookCharacterId={id}
       hasWorldbook={Boolean(wb)}

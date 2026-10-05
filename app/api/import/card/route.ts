@@ -56,6 +56,10 @@ export async function POST(req: Request) {
         relationship: card.relationship,
         firstMessage: card.firstMessage,
         examples: card.examples,
+        ttsRefAudio: "",
+        ttsPromptText: "",
+        ttsPromptLang: "",
+        ttsLang: "",
       },
       true,
     );

@@ -68,6 +68,10 @@ export function getCharacterCard(characterId: string): CharacterCard | null {
     firstMessage: row.firstMessage,
     examples: parseExamples(row.examplesJson),
     isTemplate: row.isTemplate === 1,
+    ttsRefAudio: row.ttsRefAudio,
+    ttsPromptText: row.ttsPromptText,
+    ttsPromptLang: row.ttsPromptLang,
+    ttsLang: row.ttsLang,
   };
 }
 

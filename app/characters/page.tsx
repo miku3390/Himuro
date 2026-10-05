@@ -25,6 +25,10 @@ export default function CharactersPage() {
     examples: [],
     isTemplate: c.isTemplate === 1,
     worldbookId: wbByChar.get(c.id) ?? null,
+    ttsRefAudio: c.ttsRefAudio,
+    ttsPromptText: c.ttsPromptText,
+    ttsPromptLang: c.ttsPromptLang,
+    ttsLang: c.ttsLang,
   });
 
   return (

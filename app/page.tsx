@@ -41,6 +41,10 @@ export default function HomePage() {
     examples: parseExamples(c.examplesJson),
     isTemplate: c.isTemplate === 1,
     hasWorldbook: true,
+    ttsRefAudio: c.ttsRefAudio,
+    ttsPromptText: c.ttsPromptText,
+    ttsPromptLang: c.ttsPromptLang,
+    ttsLang: c.ttsLang,
   });
 
   return (

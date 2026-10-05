@@ -496,11 +496,13 @@ export default function ChatRoom({
                                 rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
                                 pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
                                 voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
+                                characterId: m.characterId ?? character.id,
                               });
                             } catch (e) {
                               flash(e instanceof Error ? e.message : "TTS 失败");
                             }
                           }}
+                          title={m.characterId ? "用该角色自己的音色朗读" : undefined}
                         >
                           ▶ 试听
                         </button>

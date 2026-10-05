@@ -88,10 +88,15 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
 聊天页「试听」/ 设置页「试听」
   → lib/tts.ts speak()：读 localStorage 的 himuro-tts-provider
      ├─ browser → Web Speech API（离线，音色/语速/音调可调）
-     └─ gptsovits / openai → POST /api/tts {text}
+     └─ gptsovits / openai → POST /api/tts {text, characterId?}
           → 服务端按 settings.tts.* 组装上游请求（GPT-SoVITS POST /tts JSON；
             OpenAI 兼容 POST /audio/speech）→ 音频字节流回传 → <audio> 播放
 ```
+
+- **角色级音色**（v1.4）：characters 表有 ttsRefAudio/ttsPromptText/ttsPromptLang/ttsLang 四个字段
+  （角色编辑器「角色语音」区块），/api/tts 带 characterId 时逐字段覆盖全局配置，空字段回退。
+  GPT-SoVITS 换参考音频 = 换音色；给角色训练好专属音色后填一个路径即可。聊天页试听自动带上
+  发言人的 characterId（群聊里各角色各说各的声）。
 
 - 供应商参数存 `settings` 表（保存时同步 localStorage 供聊天页免查询读取）。
 - 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
