@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { saveSettingsAction, testModelConfig } from "@/lib/actions";
-import { getChineseVoices, speak, stopSpeak } from "@/lib/tts";
+import { getChineseVoices, speak } from "@/lib/tts";
+import type { AppSettings, TtsProvider } from "@/lib/settings";
 import type { ModelConfig } from "@/lib/types";
 import { btnGhost, btnPrimary, card, input, label } from "@/lib/ui";
 
@@ -16,6 +17,13 @@ type Settings = {
   ttsVoice: string;
   ttsRate: number;
   ttsPitch: number;
+  tts: AppSettings["tts"];
+};
+
+const TTS_PROVIDER_LABEL: Record<TtsProvider, string> = {
+  browser: "浏览器内置（离线可用）",
+  gptsovits: "GPT-SoVITS（api_v2）",
+  openai: "OpenAI 兼容 /audio/speech",
 };
 
 const TIER_INFO = {
@@ -29,6 +37,9 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
   const [pending, startTransition] = useTransition();
   const [testResult, setTestResult] = useState<Record<string, { ok: boolean; reply: string }>>({});
   const [voices, setVoices] = useState<{ uri: string; name: string }[]>([]);
+  const [ttsTesting, setTtsTesting] = useState(false);
+  const [ttsError, setTtsError] = useState("");
+  const [ttsHint, setTtsHint] = useState("");
 
   useEffect(() => {
     const load = () => setVoices(getChineseVoices());
@@ -43,10 +54,15 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
     setForm((f) => ({ ...f, [key]: { ...f[key], [field]: v } }));
   }
 
+  function setTts(field: keyof Settings["tts"], v: string) {
+    setForm((f) => ({ ...f, tts: { ...f.tts, [field]: v } }));
+  }
+
   function save() {
     startTransition(async () => {
       await saveSettingsAction(form);
-      // TTS 参数同步给聊天页（Web Speech API 只在浏览器端可用）
+      // TTS 参数同步给聊天页（试听时据此选择链路）
+      localStorage.setItem("himuro-tts-provider", form.tts.provider);
       localStorage.setItem("himuro-tts-voice", form.ttsVoice);
       localStorage.setItem("himuro-tts-rate", String(form.ttsRate));
       localStorage.setItem("himuro-tts-pitch", String(form.ttsPitch));
@@ -176,63 +192,152 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
       <section className={card + " p-5"}>
         <h2 className="mb-1 font-semibold">语音（TTS）</h2>
         <p className="mb-3 text-xs text-zinc-400">
-          v1 使用浏览器内置语音：先选接近角色气质的基底音色，再微调语速/音调；在聊天页点消息的「▶ 试听」即可朗读。
-          自部署 TTS（GPT-SoVITS / CosyVoice）为后续版本。
+          浏览器内置 = 零依赖离线朗读；GPT-SoVITS = 自部署 api_v2（按参考音频克隆音色）；OpenAI 兼容 = 任意实现 /audio/speech 的服务。
+          服务端代理走 /api/tts，内网地址不暴露给页面。
         </p>
-        <div className="grid gap-3 md:grid-cols-3">
+
+        <div className="grid gap-3 md:grid-cols-2">
           <div>
-            <label className={label}>基底音色（中文）</label>
+            <label className={label}>供应商</label>
             <select
               className={input}
-              value={form.ttsVoice}
-              onChange={(e) => setForm((f) => ({ ...f, ttsVoice: e.target.value }))}
+              value={form.tts.provider}
+              onChange={(e) => setTts("provider", e.target.value)}
             >
-              <option value="">系统默认</option>
-              {voices.map((v) => (
-                <option key={v.uri} value={v.uri}>
-                  {v.name}
+              {(Object.keys(TTS_PROVIDER_LABEL) as TtsProvider[]).map((p) => (
+                <option key={p} value={p}>
+                  {TTS_PROVIDER_LABEL[p]}
                 </option>
               ))}
             </select>
           </div>
-          <div>
-            <label className={label}>语速 {form.ttsRate.toFixed(1)}x</label>
-            <input
-              type="range"
-              min={0.5}
-              max={2}
-              step={0.1}
-              value={form.ttsRate}
-              className="w-full accent-indigo-600"
-              onChange={(e) => setForm((f) => ({ ...f, ttsRate: Number(e.target.value) }))}
-            />
-          </div>
-          <div>
-            <label className={label}>音调 {form.ttsPitch.toFixed(1)}</label>
-            <input
-              type="range"
-              min={0}
-              max={2}
-              step={0.1}
-              value={form.ttsPitch}
-              className="w-full accent-indigo-600"
-              onChange={(e) => setForm((f) => ({ ...f, ttsPitch: Number(e.target.value) }))}
-            />
-          </div>
         </div>
-        <button
-          className={btnGhost + " mt-3 text-xs"}
-          onClick={() => {
-            stopSpeak();
-            speak("你好呀，我是你要找的那个声音。以后的日子里，也请多指教了。", {
-              voiceURI: form.ttsVoice || undefined,
-              rate: form.ttsRate,
-              pitch: form.ttsPitch,
-            });
-          }}
-        >
-          ▶ 试听
-        </button>
+
+        {form.tts.provider === "gptsovits" && (
+          <div className="mt-3 flex flex-col gap-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className={label}>Base URL（如 http://127.0.0.1:9880）</label>
+                <input className={input} value={form.tts.baseUrl} onChange={(e) => setTts("baseUrl", e.target.value)} />
+              </div>
+              <div>
+                <label className={label}>合成语言 text_lang（zh / ja / en / auto）</label>
+                <input className={input} value={form.tts.lang} onChange={(e) => setTts("lang", e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className={label}>参考音频路径（服务端文件路径，决定音色）</label>
+              <input className={input} value={form.tts.refAudio} onChange={(e) => setTts("refAudio", e.target.value)} />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className={label}>参考音频说的话（prompt_text）</label>
+                <textarea
+                  className={input + " min-h-16"}
+                  value={form.tts.promptText}
+                  onChange={(e) => setTts("promptText", e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={label}>参考音频语言 prompt_lang（ja / zh / en）</label>
+                <input className={input} value={form.tts.promptLang} onChange={(e) => setTts("promptLang", e.target.value)} />
+                <p className="mt-2 text-xs text-zinc-400">
+                  提示：在 WSL 里跑 <code>bash ~/GPT-SoVITS/start_api.sh</code> 启动服务。
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {form.tts.provider === "openai" && (
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <div>
+              <label className={label}>Base URL（如 http://127.0.0.1:50000/v1）</label>
+              <input className={input} value={form.tts.baseUrl} onChange={(e) => setTts("baseUrl", e.target.value)} />
+            </div>
+            <div>
+              <label className={label}>模型名</label>
+              <input className={input} value={form.tts.model} onChange={(e) => setTts("model", e.target.value)} placeholder="cosyvoice-v2" />
+            </div>
+            <div>
+              <label className={label}>音色 voice</label>
+              <input className={input} value={form.tts.voice} onChange={(e) => setTts("voice", e.target.value)} placeholder="alloy" />
+            </div>
+          </div>
+        )}
+
+        {form.tts.provider === "browser" && (
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <div>
+              <label className={label}>基底音色（中文）</label>
+              <select
+                className={input}
+                value={form.ttsVoice}
+                onChange={(e) => setForm((f) => ({ ...f, ttsVoice: e.target.value }))}
+              >
+                <option value="">系统默认</option>
+                {voices.map((v) => (
+                  <option key={v.uri} value={v.uri}>
+                    {v.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className={label}>语速 {form.ttsRate.toFixed(1)}x</label>
+              <input
+                type="range"
+                min={0.5}
+                max={2}
+                step={0.1}
+                value={form.ttsRate}
+                className="w-full accent-indigo-600"
+                onChange={(e) => setForm((f) => ({ ...f, ttsRate: Number(e.target.value) }))}
+              />
+            </div>
+            <div>
+              <label className={label}>音调 {form.ttsPitch.toFixed(1)}</label>
+              <input
+                type="range"
+                min={0}
+                max={2}
+                step={0.1}
+                value={form.ttsPitch}
+                className="w-full accent-indigo-600"
+                onChange={(e) => setForm((f) => ({ ...f, ttsPitch: Number(e.target.value) }))}
+              />
+            </div>
+          </div>
+        )}
+
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            className={btnGhost + " text-xs"}
+            disabled={ttsTesting}
+            onClick={async () => {
+              setTtsTesting(true);
+              setTtsError("");
+              try {
+                // 试听永远走「保存前的当前表单链路」：先按当前表单值更新 localStorage
+                localStorage.setItem("himuro-tts-provider", form.tts.provider);
+                const used = await speak(
+                  "你好呀，我是你要找的那个声音。以后的日子里，也请多指教了。",
+                  { voiceURI: form.ttsVoice || undefined, rate: form.ttsRate, pitch: form.ttsPitch },
+                );
+                if (used === "server") setTtsHint("已请求服务端合成，稍候即播");
+              } catch (e) {
+                setTtsError(e instanceof Error ? e.message : "TTS 失败");
+              } finally {
+                setTtsTesting(false);
+              }
+            }}
+          >
+            ▶ 试听
+          </button>
+          {ttsTesting && <span className="text-xs text-zinc-400">合成中…（自部署模型首次合成较慢）</span>}
+          {ttsHint && <span className="text-xs text-emerald-600">{ttsHint}</span>}
+          {ttsError && <span className="text-xs text-red-500">{ttsError}</span>}
+        </div>
       </section>
     </div>
   );

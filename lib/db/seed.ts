@@ -252,7 +252,20 @@ export function seedIfEmpty(db: DB) {
   const now = Date.now();
 
   db.insert(settings)
-    .values({ id: 1, updatedAt: now })
+    .values({
+      id: 1,
+      updatedAt: now,
+      // TTS 预填本机 WSL 的 GPT-SoVITS（忍野扇音色）；服务未启动时试听会报错，
+      // 可在设置页把供应商切回「浏览器内置」
+      ttsProvider: "gptsovits",
+      ttsBaseUrl: "http://127.0.0.1:9880",
+      ttsLang: "zh",
+      ttsRefAudio:
+        "/home/miku/GPT-SoVITS/GPT_SoVITS/output/切片/vocal_扇_原声.wav_20.wav_0000020800_0000234240.wav",
+      ttsPromptText:
+        "しかしそれはともかくとして、あららぎ先輩、仲間を頼るのは悪いことではありませんが",
+      ttsPromptLang: "ja",
+    })
     .onConflictDoNothing()
     .run();
 

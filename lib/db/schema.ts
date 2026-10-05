@@ -158,5 +158,16 @@ export const settings = sqliteTable("settings", {
   ttsVoice: text("tts_voice").notNull().default(""),
   ttsRate: real("tts_rate").notNull().default(1),
   ttsPitch: real("tts_pitch").notNull().default(1),
+  /** 自部署 TTS 供应商：browser=浏览器内置 gptsovits=GPT-SoVITS(api_v2) openai=OpenAI 兼容 /audio/speech */
+  ttsProvider: text("tts_provider").notNull().default("browser"),
+  ttsBaseUrl: text("tts_base_url").notNull().default(""),
+  /** GPT-SoVITS：合成语言 text_lang / 参考音频路径 / 参考音频的文本与语言 */
+  ttsLang: text("tts_lang").notNull().default("zh"),
+  ttsRefAudio: text("tts_ref_audio").notNull().default(""),
+  ttsPromptText: text("tts_prompt_text").notNull().default(""),
+  ttsPromptLang: text("tts_prompt_lang").notNull().default("ja"),
+  /** OpenAI 兼容 TTS：模型与音色 */
+  ttsModel: text("tts_model").notNull().default(""),
+  ttsOpenaiVoice: text("tts_openai_voice").notNull().default(""),
   updatedAt: integer("updated_at").notNull(),
 });

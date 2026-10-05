@@ -489,13 +489,17 @@ export default function ChatRoom({
                         </button>
                         <button
                           className="hover:text-indigo-500"
-                          onClick={() => {
+                          onClick={async () => {
                             stopSpeak();
-                            speak(m.content, {
-                              rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
-                              pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
-                              voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
-                            });
+                            try {
+                              await speak(m.content, {
+                                rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
+                                pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
+                                voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
+                              });
+                            } catch (e) {
+                              flash(e instanceof Error ? e.message : "TTS 失败");
+                            }
                           }}
                         >
                           ▶ 试听

@@ -15,6 +15,7 @@ Next.js 16 单进程（App Router）
   ├── app/api/chat/route.ts        聊天 SSE 流式接口（核心；支持 reroll 重Roll）
   ├── app/api/export/route.ts      导出 TXT/JSON
   ├── app/api/import/card/route.ts 角色卡导入（SillyTavern PNG/V1V2V3 JSON/Himuro 卡）
+  ├── app/api/tts/route.ts         TTS 服务端代理（gptsovits / openai 兼容）
   └── lib/
       ├── db/schema.ts             Drizzle 表定义（唯一 schema 源）
       ├── db/index.ts              SQLite 单例 + 启动时自动迁移 + 种子
@@ -23,6 +24,7 @@ Next.js 16 单进程（App Router）
       ├── memory.ts                三层记忆引擎 + 世界书命中
       ├── llm.ts                   OpenAI 兼容客户端（流式/补全/Embedding）+ mock 演示模型
       ├── stcard.ts                SillyTavern 卡解析（PNG tEXt chunk / V1V2V3 归一化 / 宏替换）
+      ├── tts.ts                   TTS 客户端统一入口（browser=Web Speech / gptsovits+openai=调 /api/tts 播音频）
       ├── settings.ts              设置读写
       ├── story.ts                 连载任务（钩子/提炼）
       ├── actions.ts               全部 Server Actions（CRUD）
@@ -79,6 +81,22 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
 - **同轮多角色**：被选中的发言者按顺序**逐个**生成（lib/chatEngine.ts 每次重新读消息窗口，后发言者能看到前者本轮的发言）；system prompt 附「群聊场景」块 + 历史消息带「（名字）：」前缀，禁止替其他角色发言。
 - **记忆**：世界书命中按成员用自己的世界书独立计算；滚动摘要与向量库全群共享。
 - **前端坑位**：React updater 延迟执行——speaker_done 处理里闭包引用的累加变量必须先快照（`const spokenText = speakerAcc`）再清零，否则消息内容为空串（已踩过的坑，见 ChatRoom.tsx 注释）。
+
+## TTS 链路（lib/tts.ts + app/api/tts/route.ts）
+
+```
+聊天页「试听」/ 设置页「试听」
+  → lib/tts.ts speak()：读 localStorage 的 himuro-tts-provider
+     ├─ browser → Web Speech API（离线，音色/语速/音调可调）
+     └─ gptsovits / openai → POST /api/tts {text}
+          → 服务端按 settings.tts.* 组装上游请求（GPT-SoVITS POST /tts JSON；
+            OpenAI 兼容 POST /audio/speech）→ 音频字节流回传 → <audio> 播放
+```
+
+- 供应商参数存 `settings` 表（保存时同步 localStorage 供聊天页免查询读取）。
+- 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
+- 种子默认 provider=gptsovits 并预填扇的参考音频；服务未启动时试听会报错，可切回 browser。
+- Phase 3：按角色换参考音频（GPT-SoVITS 换 ref 即换音色）、批量导出、逐句高潮配音。
 
 客户端（components/ChatRoom.tsx）用 fetch + ReadableStream 解析 SSE，不依赖 EventSource（因为要 POST）。
 

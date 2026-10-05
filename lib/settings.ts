@@ -6,6 +6,8 @@ import type { ModelConfig, Tier } from "@/lib/types";
 
 /** 设置单行表封装。默认值全部指向内置演示模型，开箱即用。 */
 
+export type TtsProvider = "browser" | "gptsovits" | "openai";
+
 export type AppSettings = {
   light: ModelConfig;
   quality: ModelConfig;
@@ -16,6 +18,16 @@ export type AppSettings = {
   ttsVoice: string;
   ttsRate: number;
   ttsPitch: number;
+  tts: {
+    provider: TtsProvider;
+    baseUrl: string;
+    lang: string;
+    refAudio: string;
+    promptText: string;
+    promptLang: string;
+    model: string;
+    voice: string;
+  };
 };
 
 export function getSettings(): AppSettings {
@@ -43,6 +55,18 @@ export function getSettings(): AppSettings {
     ttsVoice: row.ttsVoice,
     ttsRate: row.ttsRate,
     ttsPitch: row.ttsPitch,
+    tts: {
+      provider: (["browser", "gptsovits", "openai"].includes(row.ttsProvider)
+        ? row.ttsProvider
+        : "browser") as AppSettings["tts"]["provider"],
+      baseUrl: row.ttsBaseUrl,
+      lang: row.ttsLang,
+      refAudio: row.ttsRefAudio,
+      promptText: row.ttsPromptText,
+      promptLang: row.ttsPromptLang,
+      model: row.ttsModel,
+      voice: row.ttsOpenaiVoice,
+    },
   };
 }
 
@@ -65,6 +89,14 @@ export function saveSettings(patch: Partial<AppSettings>) {
       ttsVoice: patch.ttsVoice,
       ttsRate: patch.ttsRate,
       ttsPitch: patch.ttsPitch,
+      ttsProvider: patch.tts?.provider,
+      ttsBaseUrl: patch.tts?.baseUrl,
+      ttsLang: patch.tts?.lang,
+      ttsRefAudio: patch.tts?.refAudio,
+      ttsPromptText: patch.tts?.promptText,
+      ttsPromptLang: patch.tts?.promptLang,
+      ttsModel: patch.tts?.model,
+      ttsOpenaiVoice: patch.tts?.voice,
       updatedAt: now,
     })
     .where(eq(settings.id, 1))

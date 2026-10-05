@@ -135,6 +135,24 @@ db.prepare("DELETE FROM messages WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conv_members WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(gConvId);
 
+/* ---------- 5. 自部署 TTS 代理 ---------- */
+const ttsCfg = db.prepare("SELECT tts_provider, tts_base_url FROM settings WHERE id=1").get();
+const gptReachable = await fetch("http://127.0.0.1:9880/docs")
+  .then((r) => r.ok)
+  .catch(() => false);
+if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
+  console.log("- GPT-SoVITS 服务未运行，跳过 TTS 用例（启动: wsl bash ~/GPT-SoVITS/start_api.sh）");
+} else {
+  const ttsRes = await fetch("http://localhost:3000/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。" }),
+  });
+  const ct = ttsRes.headers.get("content-type") ?? "";
+  const bytes = (await ttsRes.arrayBuffer()).byteLength;
+  ok(ttsRes.ok && ct.startsWith("audio/") && bytes > 10000, `TTS 代理返回音频（${ct}, ${bytes} bytes）`);
+}
+
 /* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(convId);

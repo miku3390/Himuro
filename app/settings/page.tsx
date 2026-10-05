@@ -17,6 +17,7 @@ export default function SettingsPage() {
         ttsVoice: s.ttsVoice,
         ttsRate: s.ttsRate,
         ttsPitch: s.ttsPitch,
+        tts: s.tts,
       }}
     />
   );
