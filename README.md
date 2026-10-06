@@ -59,3 +59,7 @@ npm run build && npm start   # 生产模式
 ## 技术栈
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · SQLite (better-sqlite3 + Drizzle ORM) · OpenAI 兼容 API 直连（无 SDK 依赖）
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。代码全部自有；角色卡/世界书/记忆等功能形态参考「AI风月」的公开文档与教程，未使用其任何代码。
