@@ -1,5 +1,6 @@
 import { getCharacterCard } from "@/lib/memory";
 import { getSettings } from "@/lib/settings";
+import { clampTtsRate } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -9,18 +10,23 @@ const TIMEOUT_MS = 240_000;
  * 自部署 TTS 代理：浏览器 → /api/tts → GPT-SoVITS / OpenAI 兼容服务。
  * 绕开 CORS，密钥/内网地址不出服务端。
  *
- * 请求：{ text, characterId? }
- *   characterId 给定时优先用该角色自己的参考音频/语言配置（GPT-SoVITS 换 ref 即换音色），
- *   角色没配的字段回退到设置页全局值。
+ * 请求：{ text, characterId?, speed? }
+ *   characterId 给定时优先用该角色自己的参考音频/语言/语速配置（GPT-SoVITS 换 ref 即换音色），
+ *   角色没配的字段回退到设置页全局值；speed 是客户端传来的全局语速（浏览器档也用它）。
  * 返回：audio/wav（gptsovits）或按供应商格式的音频字节流；provider=browser 返回 400。
  */
 export async function POST(req: Request) {
-  const body = (await req.json()) as { text?: string; characterId?: string };
+  const body = (await req.json().catch(() => null)) as
+    | { text?: string; characterId?: string; speed?: number }
+    | null;
+  if (!body) return Response.json({ error: "请求体不是合法 JSON" }, { status: 400 });
   const text = (body.text ?? "").trim().slice(0, 1000);
   if (!text) return Response.json({ error: "缺少 text" }, { status: 400 });
 
   const s = getSettings();
   let tts = { ...s.tts };
+  // 语速：客户端传来的全局值 → 设置表里的值 → 1.0，最后再看角色有没有自己的
+  let speed = clampTtsRate(body.speed ?? s.ttsRate);
 
   // 角色级覆盖（仅 GPT-SoVITS 链路有意义：参考音频即音色）
   if (body.characterId) {
@@ -33,6 +39,7 @@ export async function POST(req: Request) {
         promptLang: card.ttsPromptLang || tts.promptLang,
         lang: card.ttsLang || tts.lang,
       };
+      if (card.ttsRate > 0) speed = clampTtsRate(card.ttsRate);
     }
   }
 
@@ -52,6 +59,7 @@ export async function POST(req: Request) {
           prompt_lang: tts.promptLang || "ja",
           media_type: "wav",
           streaming: false,
+          speed_factor: speed,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
@@ -88,6 +96,7 @@ export async function POST(req: Request) {
           input: text,
           voice: tts.voice || "alloy",
           response_format: "mp3",
+          speed,
         }),
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });

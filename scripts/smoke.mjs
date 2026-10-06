@@ -167,16 +167,17 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   const ttsRes = await fetch("http://localhost:3000/api/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。" }),
+    // 语速走 speed_factor（GPT-SoVITS），服务端会夹到 0.6~1.65
+    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。", speed: 0.9 }),
   });
   const ct = ttsRes.headers.get("content-type") ?? "";
   const bytes = (await ttsRes.arrayBuffer()).byteLength;
   ok(ttsRes.ok && ct.startsWith("audio/") && bytes > 10000, `TTS 代理返回音频（${ct}, ${bytes} bytes）`);
 
-  // 角色级覆盖：建一个带扇参考音频的临时角色，带 characterId 请求应同样出音频
+  // 角色级覆盖：建一个带扇参考音频 + 专属语速的临时角色，带 characterId 请求应同样出音频
   const ttsCharId = crypto.randomUUID();
   db.prepare(
-    "INSERT INTO characters (id, name, identity, tts_ref_audio, tts_prompt_text, tts_prompt_lang, tts_lang, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?,?,0,?,?)",
+    "INSERT INTO characters (id, name, identity, tts_ref_audio, tts_prompt_text, tts_prompt_lang, tts_lang, tts_rate, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?)",
   ).run(
     ttsCharId,
     "TTS测试角色",
@@ -185,6 +186,7 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
     "しかしそれはともかくとして、あららぎ先輩、仲間を頼るのは悪いことではありませんが",
     "ja",
     "zh",
+    1.4,
     now,
     now,
   );
@@ -195,8 +197,27 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   });
   const ct2 = ttsRes2.headers.get("content-type") ?? "";
   const bytes2 = (await ttsRes2.arrayBuffer()).byteLength;
-  ok(ttsRes2.ok && ct2.startsWith("audio/") && bytes2 > 10000, `角色级 TTS 覆盖生效（${ct2}, ${bytes2} bytes）`);
+  ok(ttsRes2.ok && ct2.startsWith("audio/") && bytes2 > 10000, `角色级 TTS 覆盖（音色+语速 1.4）生效（${ct2}, ${bytes2} bytes）`);
   db.prepare("DELETE FROM characters WHERE id=?").run(ttsCharId);
+
+  // 语速真的传到了模型：同一句话，慢速档的音频必须比快速档长
+  const wavSeconds = (buf) => {
+    const sr = buf.readUInt32LE(24);
+    const ch = buf.readUInt16LE(22);
+    const bits = buf.readUInt16LE(34);
+    return (buf.length - 44) / (sr * ch * (bits / 8));
+  };
+  const synthAt = async (speed) => {
+    const r = await fetch("http://localhost:3000/api/tts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "你好，我是忍野扇。", speed }),
+    });
+    return wavSeconds(Buffer.from(await r.arrayBuffer()));
+  };
+  const slow = await synthAt(0.7);
+  const fast = await synthAt(1.5);
+  ok(slow > fast, `语速生效：0.7x 比 1.5x 长（${slow.toFixed(2)}s vs ${fast.toFixed(2)}s）`);
 }
 
 /* ---------- 6. 导出（复盘用，必须脱敏） ---------- */

@@ -60,6 +60,7 @@ export async function POST(req: Request) {
         ttsPromptText: "",
         ttsPromptLang: "",
         ttsLang: "",
+        ttsRate: 0,
       },
       true,
     );

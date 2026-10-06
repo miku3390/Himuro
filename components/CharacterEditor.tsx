@@ -70,6 +70,7 @@ export default function CharacterEditor({
         ttsPromptText: form.ttsPromptText,
         ttsPromptLang: form.ttsPromptLang,
         ttsLang: form.ttsLang,
+        ttsRate: form.ttsRate,
       },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -251,6 +252,21 @@ export default function CharacterEditor({
               <div>
                 <label className={label}>合成语言</label>
                 <input className={input} value={form.ttsLang} onChange={(e) => set("ttsLang")(e.target.value)} placeholder="zh / ja / en（留空=全局）" />
+              </div>
+              <div>
+                <label className={label}>
+                  语速 {form.ttsRate > 0 ? `${form.ttsRate.toFixed(2)}x` : "（跟随全局）"}
+                </label>
+                <input
+                  className={input}
+                  type="number"
+                  min={0}
+                  max={1.65}
+                  step={0.05}
+                  value={form.ttsRate}
+                  onChange={(e) => setForm((f) => ({ ...f, ttsRate: Number(e.target.value) || 0 }))}
+                  title="0 = 跟随设置页的全局语速；GPT-SoVITS 实测有效区间 0.6~1.65"
+                />
               </div>
             </div>
           </div>

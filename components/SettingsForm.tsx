@@ -266,49 +266,56 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           </div>
         )}
 
-        {form.tts.provider === "browser" && (
-          <div className="mt-3 grid gap-3 md:grid-cols-3">
-            <div>
-              <label className={label}>基底音色（中文）</label>
-              <select
-                className={input}
-                value={form.ttsVoice}
-                onChange={(e) => setForm((f) => ({ ...f, ttsVoice: e.target.value }))}
-              >
-                <option value="">系统默认</option>
-                {voices.map((v) => (
-                  <option key={v.uri} value={v.uri}>
-                    {v.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className={label}>语速 {form.ttsRate.toFixed(1)}x</label>
-              <input
-                type="range"
-                min={0.5}
-                max={2}
-                step={0.1}
-                value={form.ttsRate}
-                className="w-full accent-indigo-600"
-                onChange={(e) => setForm((f) => ({ ...f, ttsRate: Number(e.target.value) }))}
-              />
-            </div>
-            <div>
-              <label className={label}>音调 {form.ttsPitch.toFixed(1)}</label>
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={0.1}
-                value={form.ttsPitch}
-                className="w-full accent-indigo-600"
-                onChange={(e) => setForm((f) => ({ ...f, ttsPitch: Number(e.target.value) }))}
-              />
-            </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <div>
+            <label className={label}>语速 {form.ttsRate.toFixed(2)}x</label>
+            <input
+              type="range"
+              min={0.5}
+              max={2}
+              step={0.05}
+              value={form.ttsRate}
+              className="w-full accent-indigo-600"
+              onChange={(e) => setForm((f) => ({ ...f, ttsRate: Number(e.target.value) }))}
+            />
+            <p className="mt-1 text-xs text-zinc-400">
+              三条链路通用；自部署档会夹到实测有效区间 0.6–1.65，角色卡里还能再单独覆盖
+            </p>
           </div>
-        )}
+
+          {form.tts.provider === "browser" && (
+            <>
+              <div>
+                <label className={label}>基底音色（中文）</label>
+                <select
+                  className={input}
+                  value={form.ttsVoice}
+                  onChange={(e) => setForm((f) => ({ ...f, ttsVoice: e.target.value }))}
+                >
+                  <option value="">系统默认</option>
+                  {voices.map((v) => (
+                    <option key={v.uri} value={v.uri}>
+                      {v.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={label}>音调 {form.ttsPitch.toFixed(1)}</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={form.ttsPitch}
+                  className="w-full accent-indigo-600"
+                  onChange={(e) => setForm((f) => ({ ...f, ttsPitch: Number(e.target.value) }))}
+                />
+                <p className="mt-1 text-xs text-zinc-400">仅浏览器内置语音支持</p>
+              </div>
+            </>
+          )}
+        </div>
 
         <div className="mt-3 flex items-center gap-2">
           <button

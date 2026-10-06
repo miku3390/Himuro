@@ -13,7 +13,7 @@ import {
   writeBackExample,
 } from "@/lib/actions";
 import { generateHook, distillWorldbookDraft } from "@/lib/story";
-import { speak, stopSpeak } from "@/lib/tts";
+import { fetchSpeech, speak, stopSpeak } from "@/lib/tts";
 import {
   EMOTION_PRESETS,
   GROUP_STRATEGY_LABEL,
@@ -57,6 +57,24 @@ function lastAssistantId(list: Msg[]): string | null {
   return null;
 }
 
+/** 触发一次文件下载。必须先挂进文档再点，Firefox/Safari 对游离的 <a> 不买账 */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 立刻 revoke 会让部分浏览器拿不到内容，留十秒
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** 文件名里不能出现的字符换成下划线 */
+function safeName(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, "_").slice(0, 40);
+}
+
 export default function ChatRoom({
   conversation,
   character,
@@ -81,6 +99,10 @@ export default function ChatRoom({
   const [busy, setBusy] = useState(false);
   /** 正在重Roll的那条消息（旧回复留着并压暗，成功后才被新回复替换） */
   const [rerollingId, setRerollingId] = useState<string | null>(null);
+  /** 导出配音面板：范围 + 进度 */
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<"all" | "starred">("all");
+  const [exporting, setExporting] = useState<{ done: number; total: number; failed: number } | null>(null);
   const [hits, setHits] = useState<{ speaker?: string; hits: Hit[] }>({ hits: [] });
   const [summary, setSummary] = useState(conversation.summary);
   const [hook, setHook] = useState("");
@@ -92,6 +114,8 @@ export default function ChatRoom({
   const bottomRef = useRef<HTMLDivElement>(null);
   // busy 是 state，同一帧内连点两次时第二次读到的还是 false；真正的互斥靠这个 ref
   const busyRef = useRef(false);
+  /** 导出配音的在途请求（中断按钮用） */
+  const exportAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -328,6 +352,59 @@ export default function ChatRoom({
     startTransition(() => deleteMessage(id));
   }
 
+  /* --------------------------- 导出配音（逐句合成） --------------------------- */
+  // 风月口径：语音只增强关键情绪节点，不替代全文。所以给两种范围——
+  // 全部角色回复（整篇试听/归档），或只导出星标句（那些被打上「高潮句」标记的）。
+  const exportTargets = msgs.filter(
+    (m) => m.role === "assistant" && m.content.trim() && (exportScope === "all" || m.starred),
+  );
+
+  async function exportSpeech() {
+    if (exportAbortRef.current) return;
+    const targets = exportTargets;
+    if (targets.length === 0) {
+      flash(exportScope === "starred" ? "这个会话里还没有星标句" : "这个会话里没有角色回复");
+      return;
+    }
+    stopSpeak(); // 先停掉试听，别让正在合成/播放的音频掺进来
+    const abort = new AbortController();
+    exportAbortRef.current = abort;
+    setExporting({ done: 0, total: targets.length, failed: 0 });
+    const rate = Number(localStorage.getItem("himuro-tts-rate")) || 1;
+    let failed = 0;
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (abort.signal.aborted) break;
+        const m = targets[i];
+        try {
+          // 逐条串行：GPT-SoVITS 单卡，并发只会互相排队，还容易把显存打满
+          const { blob, ext } = await fetchSpeech(m.content, {
+            characterId: m.characterId ?? character.id,
+            rate,
+            signal: abort.signal,
+          });
+          const seq = String(i + 1).padStart(2, "0");
+          const who = safeName(nameOf(m.characterId)?.name ?? character.name);
+          saveBlob(blob, `${seq}-${who}.${ext}`);
+        } catch (e) {
+          if (abort.signal.aborted) break;
+          failed++;
+          flash(e instanceof Error ? e.message : "合成失败");
+        }
+        setExporting({ done: i + 1, total: targets.length, failed });
+        // 给浏览器一点空档，连续下载太快会被当成弹窗滥用拦掉
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    } finally {
+      const stopped = abort.signal.aborted;
+      exportAbortRef.current = null;
+      setExporting(null);
+      if (stopped) flash("已中断，已经下载的文件保留");
+      else if (failed) flash(`导出结束：成功 ${targets.length - failed} 条，失败 ${failed} 条`);
+      else flash(`导出完成：${targets.length} 条音频`);
+    }
+  }
+
   /* ------------------------------ 会话级切换 ------------------------------ */
   function patchConv(patch: Partial<Conv>) {
     setConv((c) => ({ ...c, ...patch }));
@@ -475,7 +552,14 @@ export default function ChatRoom({
             </span>
           )}
 
-          <div className="ml-auto flex gap-2">
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              className={btnGhost + " text-xs"}
+              onClick={() => setExportOpen((v) => !v)}
+              title="逐句合成音频并逐条下载"
+            >
+              导出配音
+            </button>
             <a className={btnGhost + " text-xs"} href={`/api/export?conversationId=${conv.id}&format=txt`}>
               导出 TXT
             </a>
@@ -484,6 +568,39 @@ export default function ChatRoom({
             </a>
           </div>
         </div>
+
+        {exportOpen && (
+          <div className={card + " mt-3 flex flex-wrap items-center gap-3 px-4 py-3 text-xs"}>
+            <span className="font-medium">导出配音</span>
+            <select
+              className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs"
+              value={exportScope}
+              disabled={!!exporting}
+              onChange={(e) => setExportScope(e.target.value as "all" | "starred")}
+            >
+              <option value="all">全部角色回复</option>
+              <option value="starred">仅星标句（关键情绪节点）</option>
+            </select>
+            <span className="text-zinc-500">
+              共 {exportTargets.length} 条，逐条合成后按「序号-角色名」下载；浏览器首次会问是否允许下载多个文件
+            </span>
+            {exporting ? (
+              <>
+                <span className="text-indigo-600">
+                  合成中 {exporting.done}/{exporting.total}
+                  {exporting.failed ? `（失败 ${exporting.failed}）` : ""}
+                </span>
+                <button className={btnGhost + " text-xs"} onClick={() => exportAbortRef.current?.abort()}>
+                  中断
+                </button>
+              </>
+            ) : (
+              <button className={btnPrimary + " text-xs"} disabled={exportTargets.length === 0} onClick={exportSpeech}>
+                开始导出
+              </button>
+            )}
+          </div>
+        )}
 
         {/* 消息列表 */}
         <div className={card + " mt-3 flex flex-1 flex-col overflow-y-auto p-4"}>

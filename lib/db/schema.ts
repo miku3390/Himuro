@@ -42,6 +42,8 @@ export const characters = sqliteTable("characters", {
   ttsPromptText: text("tts_prompt_text").notNull().default(""),
   ttsPromptLang: text("tts_prompt_lang").notNull().default(""),
   ttsLang: text("tts_lang").notNull().default(""),
+  /** 角色级语速；0 = 未配置，回退到设置页的全局语速（1.0 是合法语速，所以不能用 0 之外的哨兵） */
+  ttsRate: real("tts_rate").notNull().default(0),
   /** 模板角色：只用来开新卡/试聊，不出现在普通列表 */
   isTemplate: integer("is_template").notNull().default(0),
   createdAt: integer("created_at").notNull(),
@@ -162,6 +164,7 @@ export const settings = sqliteTable("settings", {
   vecTopK: integer("vec_top_k").notNull().default(4),
   /** TTS（浏览器语音）参数 */
   ttsVoice: text("tts_voice").notNull().default(""),
+  /** 语速，三条链路通用：browser 的 rate / GPT-SoVITS 的 speed_factor / OpenAI 的 speed */
   ttsRate: real("tts_rate").notNull().default(1),
   ttsPitch: real("tts_pitch").notNull().default(1),
   /** 自部署 TTS 供应商：browser=浏览器内置 gptsovits=GPT-SoVITS(api_v2) openai=OpenAI 兼容 /audio/speech */

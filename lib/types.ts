@@ -50,6 +50,8 @@ export type CharacterCard = {
   ttsPromptText: string;
   ttsPromptLang: string;
   ttsLang: string;
+  /** 角色级语速；0 = 未配置，回退到设置页全局语速 */
+  ttsRate: number;
 };
 
 export type WbEntry = {
@@ -84,4 +86,19 @@ export function parseExamples(json: string): Example[] {
   } catch {
     return [];
   }
+}
+
+/** GPT-SoVITS api_v2 的 speed_factor 实测有效区间（docs/GPT-SOVITS-API.md §3.1） */
+export const TTS_SPEED_MIN = 0.6;
+export const TTS_SPEED_MAX = 1.65;
+
+/**
+ * 语速归一化：夹到实测有效区间。
+ * allowZero=true 时，0 表示「角色未配置语速」并原样保留（留空回退全局），
+ * 否则 0 与非法值一律按 1.0 处理。
+ */
+export function clampTtsRate(v: number, allowZero = false): number {
+  if (!Number.isFinite(v)) return allowZero ? 0 : 1;
+  if (allowZero && v <= 0) return 0;
+  return Math.min(TTS_SPEED_MAX, Math.max(TTS_SPEED_MIN, v));
 }

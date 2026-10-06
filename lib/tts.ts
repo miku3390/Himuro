@@ -16,6 +16,35 @@ import type { TtsProvider } from "@/lib/settings";
 
 export type TtsOptions = { voiceURI?: string; rate?: number; pitch?: number };
 
+export type SpeechAudio = { blob: Blob; ext: "wav" | "mp3" };
+
+/**
+ * 向服务端代理要一段音频，不播放。试听与「导出配音」共用同一个入口，
+ * 语速交给服务端（GPT-SoVITS 的 speed_factor / OpenAI 的 speed），角色级配置在那边合并。
+ */
+export async function fetchSpeech(
+  text: string,
+  opts: { characterId?: string; rate?: number; signal?: AbortSignal } = {},
+): Promise<SpeechAudio> {
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      text,
+      characterId: opts.characterId,
+      speed: Number.isFinite(opts.rate) ? opts.rate : undefined,
+    }),
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err.error ?? `TTS 失败 ${res.status}`);
+  }
+  const blob = await res.blob();
+  const ct = res.headers.get("content-type") ?? "";
+  return { blob, ext: ct.includes("mpeg") || ct.includes("mp3") ? "mp3" : "wav" };
+}
+
 /** 模块级单例：当前在播的音频、它的 objectURL、以及还没回来的那次合成请求 */
 let currentAudio: HTMLAudioElement | null = null;
 let currentUrl: string | null = null;
@@ -59,21 +88,18 @@ export function getChineseVoices(): { uri: string; name: string }[] {
     .map((v) => ({ uri: v.voiceURI, name: `${v.name} (${v.lang})` }));
 }
 
-async function playServerTts(text: string, characterId?: string): Promise<void> {
+async function playServerTts(text: string, characterId?: string, rate?: number): Promise<void> {
   releaseServerAudio();
   const abort = new AbortController();
   currentAbort = abort;
-  const res = await fetch("/api/tts", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text, characterId }),
-    signal: abort.signal,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-    throw new Error(err.error ?? `TTS 失败 ${res.status}`);
+  let blob: Blob;
+  try {
+    ({ blob } = await fetchSpeech(text, { characterId, rate, signal: abort.signal }));
+  } catch (err) {
+    // 被新的朗读 abort 掉属于正常抢占，不当错误上报
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    throw err;
   }
-  const blob = await res.blob();
   if (abort.signal.aborted) return; // 音频回来了，但这期间已经被新的朗读顶掉
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
@@ -87,7 +113,7 @@ async function playServerTts(text: string, characterId?: string): Promise<void> 
   try {
     await audio.play();
   } catch (err) {
-    // 被新的朗读 pause 掉时 play() 会抛 AbortError，属于正常抢占，不当错误上报
+    // 被新的朗读 pause 掉时 play() 会抛 AbortError，同上
     if (!(err instanceof DOMException && err.name === "AbortError")) throw err;
   }
 }
@@ -116,7 +142,7 @@ export async function speak(
     playBrowserTts(text, opts);
     return "browser";
   }
-  await playServerTts(text, opts.characterId);
+  await playServerTts(text, opts.characterId, opts.rate);
   return "server";
 }
 

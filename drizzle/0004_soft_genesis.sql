@@ -1,0 +1,1 @@
+ALTER TABLE `characters` ADD `tts_rate` real DEFAULT 0 NOT NULL;

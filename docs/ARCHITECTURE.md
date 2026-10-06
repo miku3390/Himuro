@@ -90,13 +90,22 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（重新生成被�
 ## TTS 链路（lib/tts.ts + app/api/tts/route.ts）
 
 ```
-聊天页「试听」/ 设置页「试听」
-  → lib/tts.ts speak()：读 localStorage 的 himuro-tts-provider
+聊天页「试听」/ 设置页「试听」/ 聊天页「导出配音」
+  → lib/tts.ts：读 localStorage 的 himuro-tts-provider
      ├─ browser → Web Speech API（离线，音色/语速/音调可调）
-     └─ gptsovits / openai → POST /api/tts {text, characterId?}
+     └─ gptsovits / openai → fetchSpeech() → POST /api/tts {text, characterId?, speed?}
           → 服务端按 settings.tts.* 组装上游请求（GPT-SoVITS POST /tts JSON；
-            OpenAI 兼容 POST /audio/speech）→ 音频字节流回传 → <audio> 播放
+            OpenAI 兼容 POST /audio/speech）→ 音频字节流回传
+          → 试听：<audio> 播放（同时只允许一段，新的先 abort 旧的）
+          → 导出：Blob 直接落成文件（不播放）
 ```
+
+- **语速**：一条链路一个旋钮。设置页 `settings.tts_rate` 同时喂 browser 的 `rate`、
+  GPT-SoVITS 的 `speed_factor`、OpenAI 的 `speed`；角色卡 `characters.tts_rate` 大于 0 时
+  覆盖全局（0 = 未配置）。服务端统一过 `clampTtsRate()` 夹到实测有效区间 0.6~1.65。
+- **导出配音**（v1.5）：聊天页把选中的角色回复逐条串行合成并按「序号-角色名.wav」下载。
+  两种范围——全部角色回复，或只导星标句（对应风月「语音只增强关键情绪节点」的口径）。
+  串行是刻意的：单卡 GPT-SoVITS 并发只会互相排队，还容易打满显存。
 
 - **角色级音色**（v1.4）：characters 表有 ttsRefAudio/ttsPromptText/ttsPromptLang/ttsLang 四个字段
   （角色编辑器「角色语音」区块），/api/tts 带 characterId 时逐字段覆盖全局配置，空字段回退。
@@ -106,7 +115,7 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（重新生成被�
 - 供应商参数存 `settings` 表（保存时同步 localStorage 供聊天页免查询读取）。
 - 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重，**默认 GPT e20 + SoVITS e8**，用户 A/B 后选定，配置在 `~/GPT-SoVITS/GPT_SoVITS/configs/tts_infer.yaml`），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
 - 种子默认 provider=gptsovits 并预填扇的参考音频；服务未启动时试听会报错，可切回 browser。
-- Phase 3 待做：批量/逐句导出音频、星标句（高潮句）配语音、把 GPT-SoVITS 的 `speed_factor` 等采样参数暴露到设置页与角色卡（目前只有 browser 档能调语速/音调）。
+- Phase 3 待做：把 GPT-SoVITS 的更多采样参数（`top_k` / `temperature` / `seed`）暴露出来；逐句高潮配音的自动选点（现在靠人工星标）。
 
 客户端（components/ChatRoom.tsx）用 fetch + ReadableStream 解析 SSE，不依赖 EventSource（因为要 POST）。
 

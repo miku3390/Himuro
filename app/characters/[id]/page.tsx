@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { characters, worldbooks } from "@/lib/db/schema";
 import CharacterEditor from "@/components/CharacterEditor";
-import { parseExamples } from "@/lib/types";
+import { cardFromRow } from "@/lib/memory";
 
 export const dynamic = "force-dynamic";
 
@@ -16,27 +16,11 @@ export default async function CharacterPage({
   const row = db.select().from(characters).where(eq(characters.id, id)).get();
   if (!row) notFound();
   const wb = db.select().from(worldbooks).where(eq(worldbooks.characterId, id)).get();
+  const card = cardFromRow(row);
 
   return (
     <CharacterEditor
-      initial={{
-        id: row.id,
-        name: row.name,
-        emoji: row.emoji,
-        color: row.color,
-        identity: row.identity,
-        speechStyle: row.speechStyle,
-        values: row.values,
-        boundaries: row.boundaries,
-        userAddressing: row.userAddressing,
-        relationship: row.relationship,
-        firstMessage: row.firstMessage,
-        examples: parseExamples(row.examplesJson),
-        ttsRefAudio: row.ttsRefAudio,
-        ttsPromptText: row.ttsPromptText,
-        ttsPromptLang: row.ttsPromptLang,
-        ttsLang: row.ttsLang,
-      }}
+      initial={card}
       worldbookCharacterId={id}
       hasWorldbook={Boolean(wb)}
     />

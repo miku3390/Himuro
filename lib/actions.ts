@@ -15,6 +15,7 @@ import {
 } from "@/lib/db/schema";
 import { saveSettings, getSettings } from "@/lib/settings";
 import {
+  clampTtsRate,
   parseExamples,
   type CharacterCard,
   type Example,
@@ -56,6 +57,8 @@ function upsertCharacterValues(input: CharacterInput) {
     ttsPromptText: input.ttsPromptText ?? "",
     ttsPromptLang: input.ttsPromptLang ?? "",
     ttsLang: input.ttsLang ?? "",
+    // 0 = 未配置（回退全局）；顺手把越界值夹到实测有效区间
+    ttsRate: clampTtsRate(input.ttsRate ?? 0, true),
   };
 }
 

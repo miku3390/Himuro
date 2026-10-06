@@ -39,6 +39,7 @@ export default function CharactersClient({
           ttsPromptText: "",
           ttsPromptLang: "",
           ttsLang: "",
+          ttsRate: 0,
         },
         true,
       );

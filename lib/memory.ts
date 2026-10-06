@@ -47,13 +47,11 @@ export function matchWorldbook(
 
 /* ------------------------------ 数据读取层 ------------------------------ */
 
-export function getCharacterCard(characterId: string): CharacterCard | null {
-  const row = db
-    .select()
-    .from(characters)
-    .where(eq(characters.id, characterId))
-    .get();
-  if (!row) return null;
+/**
+ * 唯一映射点：characters 行 → 卡片 DTO。
+ * 页面里各抄一份的写法会漏字段（加 tts_rate 时就漏了四处），统一走这里。
+ */
+export function cardFromRow(row: typeof characters.$inferSelect): CharacterCard {
   return {
     id: row.id,
     name: row.name,
@@ -72,7 +70,17 @@ export function getCharacterCard(characterId: string): CharacterCard | null {
     ttsPromptText: row.ttsPromptText,
     ttsPromptLang: row.ttsPromptLang,
     ttsLang: row.ttsLang,
+    ttsRate: row.ttsRate,
   };
+}
+
+export function getCharacterCard(characterId: string): CharacterCard | null {
+  const row = db
+    .select()
+    .from(characters)
+    .where(eq(characters.id, characterId))
+    .get();
+  return row ? cardFromRow(row) : null;
 }
 
 export function getWorldbookEntriesForCharacter(
