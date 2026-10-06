@@ -32,9 +32,13 @@ const kinds = [...new Set(first.events.map((e) => e.t))];
 const hits = first.events.find((e) => e.t === "hits")?.hits ?? [];
 const reply1 = first.events.find((e) => e.t === "done");
 ok(first.res.status === 200, "聊天 HTTP 200");
-ok(kinds.join("→") === "hits→tok→done", `事件序列 hits→tok→done（实际 ${kinds.join("→")}）`);
+ok(kinds.join("→") === "user_msg→hits→tok→done", `事件序列 user_msg→hits→tok→done（实际 ${kinds.join("→")}）`);
 ok(hits.some((h) => h.title === "周六看海的约定"), "世界书命中「周六看海的约定」");
 ok(!!reply1?.messageId, "回复落库");
+ok(
+  first.events[0]?.t === "user_msg" && first.events[0]?.id === reply1?.userMessageId,
+  "开头的 user_msg 给出了用户消息真 id（流中断时客户端靠它才能继续编辑/删除）",
+);
 
 const count1 = () => db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(convId).n;
 ok(count1() === 2, `消息数=2（实际 ${count1()}）`);
@@ -47,6 +51,11 @@ ok(reply2.messageId !== reply1.messageId, "重Roll 产生了新消息 id");
 const oldGone = db.prepare("SELECT count(*) n FROM messages WHERE id=?").get(reply1.messageId).n;
 ok(oldGone === 0, "旧回复已被删除");
 ok(count1() === 2, `重Roll 后消息数仍=2（实际 ${count1()}）`);
+const idxAfterReroll = db
+  .prepare("SELECT idx FROM messages WHERE conversation_id=? ORDER BY idx")
+  .all(convId)
+  .map((r) => r.idx);
+ok(idxAfterReroll.join(",") === "0,1", `重Roll 后 idx 重排为稠密序号（实际 ${idxAfterReroll.join(",")}）`);
 
 /* ---------- 3. SillyTavern PNG 卡导入 ---------- */
 const stCard = {
@@ -130,6 +139,18 @@ const assistantCount = db
   .get(gConvId).n;
 ok(assistantCount === 4, `群聊共 4 条角色回复（实际 ${assistantCount}）`);
 
+// 4d. 群聊重Roll：即使群策略是 all，也只让原发言人重答
+const gTarget = db
+  .prepare("SELECT id FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY idx")
+  .all(gConvId)
+  .at(-1);
+const gMsgCountBefore = db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(gConvId).n;
+const g4 = await chat({ conversationId: gConvId, reroll: true, rerollMessageId: gTarget.id });
+const spk4 = g4.events.filter((e) => e.t === "speakers").at(-1)?.speakers ?? [];
+ok(spk4.length === 1, `群聊重Roll 只让原发言人重答（实际 ${spk4.map((s) => s.name).join(",") || "无人"}）`);
+const gMsgCountAfter = db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(gConvId).n;
+ok(gMsgCountAfter === gMsgCountBefore, `群聊重Roll 后消息总数不变（${gMsgCountBefore} → ${gMsgCountAfter}）`);
+
 // 清理群聊
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conv_members WHERE conversation_id=?").run(gConvId);
@@ -187,6 +208,27 @@ ok(
   "导出只带档位与模型名，不含 apiKey / baseUrl",
 );
 ok(Array.isArray(exp.messages) && exp.messages.length === 2, `导出含 2 条消息（实际 ${exp.messages?.length}）`);
+
+/* ---------- 7. 重Roll 失败不能吞掉旧回复 ---------- */
+// 把轻量档指到一个必然连不上的地址，模拟上游不可用；跑完在 finally 里还原
+const savedLightUrl = db.prepare("SELECT light_base_url FROM settings WHERE id=1").get().light_base_url;
+const lastAssistant = db
+  .prepare("SELECT id FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY idx")
+  .all(convId)
+  .at(-1);
+let failEvents = [];
+try {
+  db.prepare("UPDATE settings SET light_base_url='http://127.0.0.1:9/v1' WHERE id=1").run();
+  const bad = await chat({ reroll: true, rerollMessageId: lastAssistant.id });
+  failEvents = bad.events;
+} finally {
+  db.prepare("UPDATE settings SET light_base_url=? WHERE id=1").run(savedLightUrl);
+}
+const errEvt = failEvents.find((e) => e.t === "err");
+ok(!!errEvt, `上游不可达时回流 err 事件（${(errEvt?.message ?? "没有 err").slice(0, 50)}）`);
+const survived = db.prepare("SELECT count(*) n FROM messages WHERE id=?").get(lastAssistant.id).n;
+ok(survived === 1, "重Roll 失败后旧回复仍在库里");
+ok(count1() === 2, `失败后消息数不变（实际 ${count1()}）`);
 
 /* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);

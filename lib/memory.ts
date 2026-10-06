@@ -229,13 +229,40 @@ function safeParseVector(json: string): number[] {
 
 /* --------------------------- 会话消息窗口工具 --------------------------- */
 
-export function getRecentMessages(conversationId: string, limit = VERBATIM_WINDOW) {
+export function getRecentMessages(
+  conversationId: string,
+  limit = VERBATIM_WINDOW,
+  excludeIds: string[] = [],
+) {
   const rows = db
     .select()
     .from(messagesTable)
     .where(eq(messagesTable.conversationId, conversationId))
     .all();
-  return rows.slice(-limit);
+  // 排除要放在截窗之前：重Roll 时被替换的那条旧回复还在库里（生成成功后才删），
+  // 但它不该作为「自己上一句」进 prompt，否则模型会照着它再答一遍
+  const usable = excludeIds.length ? rows.filter((m) => !excludeIds.includes(m.id)) : rows;
+  return usable.slice(-limit);
+}
+
+/**
+ * 把会话内的 idx 重排成 0..n-1 的稠密序号。
+ * 删除消息后不重排会留下空洞，而 idx-1 / idx> 这类「上一条」「其后所有」的查询
+ * 全靠序号连续，空洞会让它们取错对象（回写示例找不到前一条用户消息）。
+ * 个人使用规模下每条一次 UPDATE 完全可接受。
+ */
+export function renumberMessages(conversationId: string) {
+  const rows = db
+    .select({ id: messagesTable.id })
+    .from(messagesTable)
+    .where(eq(messagesTable.conversationId, conversationId))
+    .all();
+  rows.forEach((r, i) => {
+    db.update(messagesTable)
+      .set({ idx: i })
+      .where(eq(messagesTable.id, r.id))
+      .run();
+  });
 }
 
 export function getMessagesSince(conversationId: string, count: number) {

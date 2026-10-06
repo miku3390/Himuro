@@ -1,8 +1,9 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { renumberMessages } from "@/lib/memory";
 import {
   characters,
   conversations,
@@ -445,13 +446,14 @@ export async function toggleStar(messageId: string) {
     .run();
 }
 
-/** 删除单条消息（含其向量块）；idx 出现空洞不影响排序 */
+/** 删除单条消息（含其向量块），随后把 idx 重排回稠密序号 */
 export async function deleteMessage(messageId: string) {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m) return;
   const { msgChunks } = await import("@/lib/db/schema");
   db.delete(msgChunks).where(eq(msgChunks.messageId, messageId)).run();
   db.delete(messagesTable).where(eq(messagesTable.id, messageId)).run();
+  renumberMessages(m.conversationId);
 }
 
 /**
@@ -485,6 +487,8 @@ export async function editUserMessageAndTruncate(
     .set({ content })
     .where(eq(messagesTable.id, messageId))
     .run();
+  // 截断后必须重排：idx 留着空洞的话，「上一条」「其后所有」这类按序号查的逻辑会取错对象
+  renumberMessages(m.conversationId);
   db.update(conversations)
     .set({ updatedAt: now() })
     .where(eq(conversations.id, m.conversationId))
@@ -497,13 +501,14 @@ export async function editUserMessageAndTruncate(
 export async function writeBackExample(messageId: string) {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m || m.role !== "assistant") throw new Error("只能回写角色回复");
-  const prev = db
-    .select()
+  // 「上一条」按会话内实际顺序找，不靠 idx-1 推算：序号一旦有空洞或重号就会取错行
+  const seq = db
+    .select({ id: messagesTable.id, role: messagesTable.role, content: messagesTable.content })
     .from(messagesTable)
-    .where(
-      and(eq(messagesTable.conversationId, m.conversationId), eq(messagesTable.idx, m.idx - 1)),
-    )
-    .get();
+    .where(eq(messagesTable.conversationId, m.conversationId))
+    .all();
+  const at = seq.findIndex((r) => r.id === m.id);
+  const prev = at > 0 ? seq[at - 1] : undefined;
 
   const conv = db.select().from(conversations).where(eq(conversations.id, m.conversationId)).get();
   if (!conv) throw new Error("会话不存在");

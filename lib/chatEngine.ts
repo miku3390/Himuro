@@ -48,6 +48,8 @@ export type EngineParams = {
   /** 需要向量化的一条用户消息 id（重Roll/群聊非首发言者传 null 跳过） */
   embedMessageId: string | null;
   embedMessageContent: string;
+  /** 不进 prompt 的消息 id（重Roll 时那条待替换的旧回复：还在库里，但不该被自己看见） */
+  excludeMessageIds?: string[];
 };
 
 export async function generateOneReply(
@@ -55,7 +57,7 @@ export async function generateOneReply(
   settings: AppSettings,
   emit: EmitFn,
 ): Promise<{ assistantId: string; full: string }> {
-  const recent = getRecentMessages(p.conversationId, VERBATIM_WINDOW);
+  const recent = getRecentMessages(p.conversationId, VERBATIM_WINDOW, p.excludeMessageIds ?? []);
 
   const hits = matchWorldbook(
     p.entries,

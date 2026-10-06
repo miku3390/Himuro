@@ -79,6 +79,8 @@ export default function ChatRoom({
   const [streaming, setStreaming] = useState("");
   const [currentSpeaker, setCurrentSpeaker] = useState<Speaker | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 正在重Roll的那条消息（旧回复留着并压暗，成功后才被新回复替换） */
+  const [rerollingId, setRerollingId] = useState<string | null>(null);
   const [hits, setHits] = useState<{ speaker?: string; hits: Hit[] }>({ hits: [] });
   const [summary, setSummary] = useState(conversation.summary);
   const [hook, setHook] = useState("");
@@ -102,13 +104,30 @@ export default function ChatRoom({
 
   /* ---------------------------- SSE 流式公共流程 ---------------------------- */
   // 群聊一轮会有多个发言者：每个 speaker 的文本通过 speaker_done 先行落库/上屏，
-  // done 事件只负责收尾（摘要 + 用户消息真实 id）。单聊则由 done 追加唯一的回复。
+  // done 事件只负责收尾（摘要）。单聊则由 done 追加唯一的回复。
+  // 用户消息的真 id 由流开头的 user_msg 事件给出：流中断时 done 不会来，但那条消息
+  // 早已落库，客户端必须拿真 id 才能继续编辑/删除/星标（这些操作都按 id 找服务端行）。
+  // 流中途出错不抛异常，改为在返回值里带 error，调用方好判断手里的消息该留还是该撤。
+  type StreamResult = {
+    messageId: string;
+    userMessageId?: string;
+    text: string;
+    summary?: string;
+    appendedBySpeaker: boolean;
+    error?: string;
+  };
+
   async function runStream(
     payload: { content?: string; emotion?: string | null; reroll?: boolean; rerollMessageId?: string },
-  ): Promise<{ messageId: string; userMessageId?: string; text: string; summary?: string; appendedBySpeaker: boolean }> {
+  ): Promise<StreamResult> {
     setBusy(true);
     busyRef.current = true;
     let appendedBySpeaker = false;
+    let acc = "";
+    let speakerAcc = "";
+    let userMessageId: string | undefined;
+    let streamError: string | undefined;
+    let done: { messageId: string; userMessageId?: string; summary?: string } | null = null;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -117,14 +136,17 @@ export default function ChatRoom({
       });
       if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({ error: "请求失败" }));
-        throw new Error(err.error ?? `HTTP ${res.status}`);
+        // HTTP 层就失败了：服务端是先判定发言者再落库，这里确定什么都没写
+        return {
+          messageId: "",
+          text: "",
+          appendedBySpeaker: false,
+          error: err.error ?? `HTTP ${res.status}`,
+        };
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
-      let acc = "";
-      let speakerAcc = "";
-      let done: { messageId: string; userMessageId?: string; summary?: string } | null = null;
       while (true) {
         const { done: eof, value } = await reader.read();
         if (eof) break;
@@ -135,7 +157,9 @@ export default function ChatRoom({
           const line = block.trim();
           if (!line.startsWith("data:")) continue;
           const evt = JSON.parse(line.slice(5).trim());
-          if (evt.t === "hits") {
+          if (evt.t === "user_msg") {
+            userMessageId = evt.id;
+          } else if (evt.t === "hits") {
             setHits({ speaker: evt.speaker, hits: evt.hits });
           } else if (evt.t === "speaker") {
             setCurrentSpeaker({ characterId: evt.characterId, name: evt.name, emoji: evt.emoji });
@@ -166,17 +190,28 @@ export default function ChatRoom({
           } else if (evt.t === "done") {
             done = evt;
           } else if (evt.t === "err") {
-            throw new Error(evt.message);
+            streamError = evt.message;
           }
         }
+        if (streamError) break;
       }
-      if (!done) throw new Error("回复流中断");
+      if (!done && !streamError) streamError = "回复流中断";
       return {
-        messageId: done.messageId,
-        userMessageId: done.userMessageId,
+        messageId: done?.messageId ?? "",
+        userMessageId: userMessageId ?? done?.userMessageId,
         text: acc,
-        summary: done.summary,
+        summary: done?.summary,
         appendedBySpeaker,
+        error: streamError,
+      };
+    } catch (e) {
+      // 网络中断等：用户消息可能已经落库，带上已知的真 id 交给调用方判断
+      return {
+        messageId: "",
+        userMessageId,
+        text: acc,
+        appendedBySpeaker,
+        error: e instanceof Error ? e.message : String(e),
       };
     } finally {
       setStreaming("");
@@ -193,12 +228,47 @@ export default function ChatRoom({
     setInputVal("");
     const tmpId = `tmp-user-${Date.now()}`;
     setMsgs((m) => [...m, { id: tmpId, role: "user", content, emotion, starred: false }]);
+    const r = await runStream({ content, emotion });
+    // 真 id 已由 user_msg 事件拿到；一条都没拿到说明服务端根本没落库，撤掉乐观气泡
+    const realId = r.userMessageId;
+    setMsgs((m) => {
+      const settled = realId
+        ? m.map((x) => (x.id === tmpId ? { ...x, id: realId } : x))
+        : m.filter((x) => x.id !== tmpId);
+      if (r.error || r.appendedBySpeaker) return settled;
+      return [
+        ...settled,
+        {
+          id: r.messageId,
+          role: "assistant" as const,
+          content: r.text,
+          characterId: null,
+          emotion: null,
+          starred: false,
+        },
+      ];
+    });
+    if (r.error) flash(r.error);
+    if (r.summary) setSummary(r.summary);
+    setEmotion(null);
+  }
+
+  /* ------------------------- 重Roll：重新生成回复 ------------------------- */
+  async function reroll(messageId?: string) {
+    if (busyRef.current) return;
+    const target = messageId ?? lastAssistantId(msgs);
+    if (!target) return;
+    // 不乐观删除：旧回复先标成「重Roll中」留在原位。服务端同样只在新回复生成成功后才删它，
+    // 于是失败时两边都还在，不需要任何回滚逻辑
+    setRerollingId(target);
     try {
-      const r = await runStream({ content, emotion });
+      const r = await runStream({ reroll: true, rerollMessageId: target });
+      if (r.error) {
+        flash(r.error);
+        return;
+      }
       setMsgs((m) => [
-        ...m.map((x) =>
-          x.id === tmpId ? { ...x, id: r.userMessageId ?? `u-${Date.now()}` } : x,
-        ),
+        ...m.filter((x) => x.id !== target),
         ...(r.appendedBySpeaker
           ? []
           : [
@@ -213,30 +283,8 @@ export default function ChatRoom({
             ]),
       ]);
       if (r.summary) setSummary(r.summary);
-    } catch (e) {
-      flash(e instanceof Error ? e.message : String(e));
-      setMsgs((m) => m.map((x) => (x.id === tmpId ? { ...x, id: `u-${Date.now()}` } : x)));
-    }
-    setEmotion(null);
-  }
-
-  /* ------------------------- 重Roll：重新生成回复 ------------------------- */
-  async function reroll(messageId?: string) {
-    if (busyRef.current) return;
-    const target = messageId ?? lastAssistantId(msgs);
-    if (!target) return;
-    setMsgs((m) => m.filter((x) => x.id !== target)); // 乐观移除旧回复
-    try {
-      const r = await runStream({ reroll: true, rerollMessageId: target });
-      if (!r.appendedBySpeaker) {
-        setMsgs((m) => [
-          ...m,
-          { id: r.messageId, role: "assistant", content: r.text, characterId: null, emotion: null, starred: false },
-        ]);
-      }
-      if (r.summary) setSummary(r.summary);
-    } catch (e) {
-      flash(e instanceof Error ? e.message : "重Roll失败");
+    } finally {
+      setRerollingId(null);
     }
   }
 
@@ -258,6 +306,10 @@ export default function ChatRoom({
         { ...m[idx], content: editText.trim() },
       ]);
       const r = await runStream({ reroll: true }); // 末尾是刚编辑的用户消息，服务端按策略续写
+      if (r.error) {
+        flash(r.error);
+        return;
+      }
       if (!r.appendedBySpeaker) {
         setMsgs((m) => [
           ...m,
@@ -440,8 +492,18 @@ export default function ChatRoom({
               const isEditing = editingId === m.id;
               const speaker = m.role === "assistant" ? nameOf(m.characterId) : null;
               return (
-                <div key={m.id} className={"flex " + (m.role === "user" ? "justify-end" : "justify-start")}>
+                <div
+                  key={m.id}
+                  className={
+                    "flex " +
+                    (m.role === "user" ? "justify-end" : "justify-start") +
+                    (rerollingId === m.id ? " opacity-40" : "")
+                  }
+                >
                   <div className={"max-w-[85%] " + (m.role === "user" ? "text-right" : "")}>
+                    {rerollingId === m.id && (
+                      <span className={badge + " mb-1 bg-amber-50 text-amber-600"}>重Roll中…</span>
+                    )}
                     {speaker && (
                       <span className="mb-1 block text-xs font-medium" style={{ color: speaker.color }}>
                         {speaker.emoji} {speaker.name}
