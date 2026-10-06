@@ -115,7 +115,7 @@ prompt_lang:    ja
 
 ## 5. Himuro 的集成点（在 Himuro 上开发时需要知道）
 
-- Himuro（`D:\Desktop\GLM-d4\production\Himuro`，Next.js，http://localhost:3000）通过**服务端代理** `POST /api/tts {text, characterId?}` 调本服务，浏览器不直连 9880（绕 CORS、不暴露内网地址）
+- Himuro（`D:\Desktop\DSH-d4\Himuro`，Next.js，http://localhost:3000）通过**服务端代理** `POST /api/tts {text, characterId?}` 调本服务，浏览器不直连 9880（绕 CORS、不暴露内网地址）
 - 供应商配置存 Himuro 的 SQLite `settings` 表（`ttsProvider=ttsBaseUrl/ttsLang/ttsRefAudio/ttsPromptText/ttsPromptLang`），设置页可视化编辑
 - `characterId` 给定时优先用该角色自己的参考音频（`characters` 表 `ttsRefAudio` 等四字段），空字段逐项回退全局 → **换音色 = 在角色卡里填另一个参考音频路径**
 - Himuro 侧代码：`lib/tts.ts`（客户端）、`app/api/tts/route.ts`（代理）、`lib/settings.ts`

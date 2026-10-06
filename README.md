@@ -30,6 +30,8 @@ npm run dev        # 开发模式，http://localhost:3000
 npm run build && npm start   # 生产模式
 ```
 
+> 仓库根有 `.npmrc` 设了 `ignore-scripts=true`：依赖（better-sqlite3 等）自带预编译产物，不需要安装期脚本，而 better-sqlite3 包内有 `binding.gyp` 会触发 node-gyp 编译，在没有 Visual Studio 的机器上直接装不上。将来引入需要编译期脚本的依赖时，用 `npm rebuild <包名> --foreground-scripts` 单独放行。
+
 **无需任何配置即可运行**：默认使用内置「演示模型」（离线角色扮演假回复），用来熟悉流程和测试功能。
 
 ### 接入真实模型
