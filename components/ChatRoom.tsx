@@ -88,6 +88,8 @@ export default function ChatRoom({
   const [editText, setEditText] = useState("");
   const [pending, startTransition] = useTransition();
   const bottomRef = useRef<HTMLDivElement>(null);
+  // busy 是 state，同一帧内连点两次时第二次读到的还是 false；真正的互斥靠这个 ref
+  const busyRef = useRef(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -105,6 +107,7 @@ export default function ChatRoom({
     payload: { content?: string; emotion?: string | null; reroll?: boolean; rerollMessageId?: string },
   ): Promise<{ messageId: string; userMessageId?: string; text: string; summary?: string; appendedBySpeaker: boolean }> {
     setBusy(true);
+    busyRef.current = true;
     let appendedBySpeaker = false;
     try {
       const res = await fetch("/api/chat", {
@@ -179,13 +182,14 @@ export default function ChatRoom({
       setStreaming("");
       setCurrentSpeaker(null);
       setBusy(false);
+      busyRef.current = false;
     }
   }
 
   /* ------------------------------- 发送消息 ------------------------------- */
   async function send() {
     const content = inputVal.trim();
-    if (!content || busy) return;
+    if (!content || busyRef.current) return;
     setInputVal("");
     const tmpId = `tmp-user-${Date.now()}`;
     setMsgs((m) => [...m, { id: tmpId, role: "user", content, emotion, starred: false }]);
@@ -218,7 +222,7 @@ export default function ChatRoom({
 
   /* ------------------------- 重Roll：重新生成回复 ------------------------- */
   async function reroll(messageId?: string) {
-    if (busy) return;
+    if (busyRef.current) return;
     const target = messageId ?? lastAssistantId(msgs);
     if (!target) return;
     setMsgs((m) => m.filter((x) => x.id !== target)); // 乐观移除旧回复
@@ -243,7 +247,7 @@ export default function ChatRoom({
   }
 
   async function saveEdit() {
-    if (!editingId || busy) return;
+    if (!editingId || busyRef.current) return;
     const id = editingId;
     setEditingId(null);
     try {
@@ -297,7 +301,9 @@ export default function ChatRoom({
 
   /* ------------------------------ 连载工具 ------------------------------ */
   function genHook() {
+    if (busyRef.current) return;
     setBusy(true);
+    busyRef.current = true;
     startTransition(async () => {
       try {
         setHook(await generateHook(conv.id));
@@ -305,6 +311,7 @@ export default function ChatRoom({
         flash(e instanceof Error ? e.message : "生成失败");
       } finally {
         setBusy(false);
+        busyRef.current = false;
       }
     });
   }
@@ -338,7 +345,9 @@ export default function ChatRoom({
   }
 
   function runDistill() {
+    if (busyRef.current) return;
     setBusy(true);
+    busyRef.current = true;
     startTransition(async () => {
       try {
         setDrafts(await distillWorldbookDraft(conv.id));
@@ -346,6 +355,7 @@ export default function ChatRoom({
         flash(e instanceof Error ? e.message : "提炼失败");
       } finally {
         setBusy(false);
+        busyRef.current = false;
       }
     });
   }

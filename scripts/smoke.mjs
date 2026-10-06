@@ -178,6 +178,16 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   db.prepare("DELETE FROM characters WHERE id=?").run(ttsCharId);
 }
 
+/* ---------- 6. 导出（复盘用，必须脱敏） ---------- */
+const expRes = await fetch(`http://localhost:3000/api/export?conversationId=${convId}&format=json`);
+const exp = await expRes.json();
+ok(expRes.ok && exp.model?.tier === "light", `导出 JSON 带档位（${JSON.stringify(exp.model)}）`);
+ok(
+  typeof exp.model?.name === "string" && !("apiKey" in (exp.model ?? {})) && !exp.model?.baseUrl,
+  "导出只带档位与模型名，不含 apiKey / baseUrl",
+);
+ok(Array.isArray(exp.messages) && exp.messages.length === 2, `导出含 2 条消息（实际 ${exp.messages?.length}）`);
+
 /* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(convId);

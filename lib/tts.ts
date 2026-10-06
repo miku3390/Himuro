@@ -5,15 +5,39 @@ import type { TtsProvider } from "@/lib/settings";
 /**
  * TTS 客户端统一入口。三种供应商：
  * - browser：Web Speech API（零依赖离线），音色/语速/音调可调
- * - gptsovits / openai：走服务端 /api/tts 代理（本模块只管播音频）
+ * - gptsovits / openai：走服务端 /api/tts 代理，请求组装见 app/api/tts/route.ts
  *
  * 供应商参数保存在设置页（SQLite），同时同步一份到 localStorage，
  * 聊天页试听时据此选择链路（避免每条消息多一次配置请求）。
  *
- * Phase 3 可在此扩展：按角色选参考音频（GPT-SoVITS 换 ref 即换音色）、批量导出。
+ * 同一时刻只允许一段音频在响：新的朗读先掐掉上一段，连在路上的合成请求一起 abort，
+ * GPT-SoVITS 合成慢（冷启动可到十几秒），不这么做连点两条消息就会叠着播。
  */
 
 export type TtsOptions = { voiceURI?: string; rate?: number; pitch?: number };
+
+/** 模块级单例：当前在播的音频、它的 objectURL、以及还没回来的那次合成请求 */
+let currentAudio: HTMLAudioElement | null = null;
+let currentUrl: string | null = null;
+let currentAbort: AbortController | null = null;
+
+/** 停掉服务端音频链路（含在途请求与 objectURL 回收）。可重复调用 */
+function releaseServerAudio() {
+  currentAbort?.abort();
+  currentAbort = null;
+  if (currentAudio) {
+    // 先摘掉回调，避免 pause/换源触发的 ended/error 又回头调用本函数
+    currentAudio.onended = null;
+    currentAudio.onerror = null;
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
+    currentAudio = null;
+  }
+  if (currentUrl) {
+    URL.revokeObjectURL(currentUrl);
+    currentUrl = null;
+  }
+}
 
 export function ttsSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
@@ -36,21 +60,36 @@ export function getChineseVoices(): { uri: string; name: string }[] {
 }
 
 async function playServerTts(text: string, characterId?: string): Promise<void> {
+  releaseServerAudio();
+  const abort = new AbortController();
+  currentAbort = abort;
   const res = await fetch("/api/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text, characterId }),
+    signal: abort.signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
     throw new Error(err.error ?? `TTS 失败 ${res.status}`);
   }
   const blob = await res.blob();
+  if (abort.signal.aborted) return; // 音频回来了，但这期间已经被新的朗读顶掉
   const url = URL.createObjectURL(blob);
   const audio = new Audio(url);
-  audio.onended = () => URL.revokeObjectURL(url);
-  audio.onerror = () => URL.revokeObjectURL(url);
-  await audio.play();
+  currentAudio = audio;
+  currentUrl = url;
+  const cleanup = () => {
+    if (currentAudio === audio) releaseServerAudio();
+  };
+  audio.onended = cleanup;
+  audio.onerror = cleanup;
+  try {
+    await audio.play();
+  } catch (err) {
+    // 被新的朗读 pause 掉时 play() 会抛 AbortError，属于正常抢占，不当错误上报
+    if (!(err instanceof DOMException && err.name === "AbortError")) throw err;
+  }
 }
 
 function playBrowserTts(text: string, opts: TtsOptions = {}) {
@@ -73,6 +112,7 @@ export async function speak(
 ): Promise<"browser" | "server"> {
   const provider = currentProvider();
   if (provider === "browser") {
+    releaseServerAudio(); // 换到浏览器音色时，别让上一条服务端音频还在响
     playBrowserTts(text, opts);
     return "browser";
   }
@@ -80,6 +120,8 @@ export async function speak(
   return "server";
 }
 
+/** 停掉一切语音：浏览器合成与服务端音频都停 */
 export function stopSpeak() {
   if (ttsSupported()) speechSynthesis.cancel();
+  releaseServerAudio();
 }
