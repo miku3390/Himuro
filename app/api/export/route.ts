@@ -6,6 +6,7 @@ import {
   convMembers,
   messages as messagesTable,
 } from "@/lib/db/schema";
+import { getActivePath } from "@/lib/branch";
 import { getSettings } from "@/lib/settings";
 
 export const runtime = "nodejs";
@@ -37,6 +38,9 @@ export async function GET(req: Request) {
     .where(eq(messagesTable.conversationId, conversationId))
     .all();
   const settings = getSettings();
+
+  // TXT 剧本只走活跃路径：死分支混进复盘稿会让人摸不着头脑；JSON 是全量数据（含死分支）
+  const txtRows = getActivePath(conversationId);
 
   // 发言人名字映射（群聊）：成员 + 历史消息中出现过的角色
   const nameById: Record<string, string> = {};
@@ -108,7 +112,7 @@ export async function GET(req: Request) {
       `导出时间：${new Date().toLocaleString("zh-CN")}`,
       "".padEnd(40, "-"),
       "",
-      ...rows.map(
+      ...txtRows.map(
         (m) =>
           `${m.starred ? "★ " : ""}${roleLabel(m)}${m.emotion ? `（情绪目标：${m.emotion}）` : ""}：\n${m.content}\n`,
       ),

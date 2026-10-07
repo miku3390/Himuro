@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { characters, conversations, convMembers, messages as messagesTable } from "@/lib/db/schema";
-import { getActivePath, getAllMessages, withAltInfo } from "@/lib/branch";
+import { alternativesOf, getActivePath, getAllMessages, withAltInfo } from "@/lib/branch";
 import ChatRoom from "@/components/ChatRoom";
 import { getCharacterCard } from "@/lib/memory";
 
@@ -47,6 +47,22 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
   const allRows = getAllMessages(id);
   const visibleRows = withAltInfo(getActivePath(id), allRows);
 
+  // 分叉点（活跃路径上有兄弟备选的消息）：侧栏「分支树」面板的数据
+  const forks = visibleRows
+    .filter((m) => m.altCount > 1)
+    .map((m) => ({
+      id: m.id,
+      isUser: m.role === "user",
+      altIndex: m.altIndex,
+      altCount: m.altCount,
+      options: alternativesOf(m, allRows).map((r, i) => ({
+        id: r.id,
+        index: i + 1,
+        excerpt: r.content.replace(/\s+/g, " ").trim().slice(0, 26) || "（空）",
+        active: r.id === m.id,
+      })),
+    }));
+
   // 「添加成员」下拉的候选 = 全部非模板角色
   const allMine = db
     .select({ id: characters.id, name: characters.name, emoji: characters.emoji, color: characters.color })
@@ -79,6 +95,8 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
         altIndex: m.altIndex,
         altCount: m.altCount,
       }))}
+      forks={forks}
+      totalMessages={allRows.length}
     />
   );
 }

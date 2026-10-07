@@ -79,6 +79,12 @@ const r4 = db.prepare("SELECT parent_id FROM messages WHERE id=?").get(reply4.me
 ok(!!reply4?.messageId && r4.parent_id === r1.parent_id, "切回旧分支后重Roll 挂载点正确");
 ok(count1() === 5, `消息数=5（实际 ${count1()}）`);
 
+// TXT 导出只走活跃路径：库存 5 条，活跃路径只有 2 条（用户 + 当前活跃的兄弟回复）
+const txtRes = await fetch(`http://localhost:3000/api/export?conversationId=${convId}&format=txt`);
+const txt = await txtRes.text();
+const spokenLines = (txt.match(/^(你|小满)(（[^）]*）)?：$/gm) ?? []).length;
+ok(txtRes.ok && spokenLines === 2, `TXT 导出只含活跃路径（发言行 ${spokenLines}/2，死分支不进剧本）`);
+
 /* ---------- 3. SillyTavern PNG 卡导入 ---------- */
 const stCard = {
   spec: "chara_card_v2",

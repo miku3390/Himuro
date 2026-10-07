@@ -66,6 +66,16 @@ type Hit = { category: string; title: string; weight: number };
 type Draft = { category: string; title: string; content: string; keywords: string[]; weight: number };
 type Speaker = { characterId: string; name: string; emoji: string };
 
+/** 分支树面板：活跃路径上某个消息的兄弟备选组（服务端算好下发） */
+export type ForkOption = { id: string; index: number; excerpt: string; active: boolean };
+export type Fork = {
+  id: string;
+  isUser: boolean;
+  altIndex: number;
+  altCount: number;
+  options: ForkOption[];
+};
+
 function lastAssistantId(list: Msg[]): string | null {
   for (let i = list.length - 1; i >= 0; i--) if (list[i].role === "assistant") return list[i].id;
   return null;
@@ -96,6 +106,8 @@ export default function ChatRoom({
   isGroup,
   allCharacters,
   initialMessages,
+  forks,
+  totalMessages,
 }: {
   conversation: Conv;
   character: CharacterCard;
@@ -103,6 +115,9 @@ export default function ChatRoom({
   isGroup: boolean;
   allCharacters: Member[];
   initialMessages: Msg[];
+  /** 分叉点列表（活跃路径上有兄弟备选的消息），服务端算好下发 */
+  forks: Fork[];
+  totalMessages: number;
 }) {
   const [conv, setConv] = useState(conversation);
   const [msgs, setMsgs] = useState<Msg[]>(initialMessages);
@@ -422,6 +437,12 @@ export default function ChatRoom({
       await switchAlternative(id, delta);
       router.refresh();
     });
+  }
+
+  /** 分支树面板：直接跳到某个兄弟备选（delta = 目标序号 − 当前序号） */
+  function jumpToForkOption(fork: Fork, opt: ForkOption) {
+    if (opt.active) return;
+    switchBranch(fork.id, opt.index - fork.altIndex);
   }
 
   /* ---------------------------- TTS 逐段试听/下载 ---------------------------- */
@@ -982,10 +1003,54 @@ export default function ChatRoom({
         </div>
       </div>
 
-      {/* 右侧栏：群聊成员 + 记忆透明化 + 连载工具 */}
+      {/* 右侧栏：分支树 + 群聊成员 + 记忆透明化 + 连载工具 */}
       <aside className="flex w-full shrink-0 flex-col gap-3 lg:w-80">
         {notice && (
           <div className="rounded-xl bg-indigo-50 px-3 py-2 text-xs text-indigo-600">{notice}</div>
+        )}
+
+        {forks.length > 0 && (
+          <section className={card + " p-4"}>
+            <h3 className="mb-2 text-sm font-semibold">分支树（{forks.length} 个分叉点）</h3>
+            <div className="flex flex-col gap-2.5">
+              {forks.map((fork) => (
+                <div key={fork.id} className="rounded-xl bg-zinc-50 p-2 text-xs">
+                  <div className="mb-1 flex items-center gap-1.5 text-zinc-500">
+                    <span>{fork.isUser ? "👤 你的话" : `💬 ${character.name}的回复`}</span>
+                    <span className="ml-auto text-zinc-400">
+                      {fork.altIndex}/{fork.altCount}
+                    </span>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {fork.options.map((opt) => (
+                      <button
+                        key={opt.id}
+                        className={
+                          "flex items-center gap-1.5 rounded-lg px-2 py-1 text-left transition " +
+                          (opt.active
+                            ? "bg-indigo-100 text-indigo-700"
+                            : "text-zinc-500 hover:bg-zinc-200/70")
+                        }
+                        disabled={pending || busy}
+                        title={opt.active ? "当前分支" : "切换到这个分支"}
+                        onClick={() => jumpToForkOption(fork, opt)}
+                      >
+                        <span className={opt.active ? "text-indigo-500" : "text-zinc-400"}>
+                          {opt.active ? "●" : "○"}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">
+                          {opt.index}. {opt.excerpt}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-400">
+              活跃路径 {msgs.length} 条 · 库里共 {totalMessages} 条（其余在死分支里，随时可切回）
+            </p>
+          </section>
         )}
 
         {isGroup && (
