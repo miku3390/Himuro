@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { saveSettingsAction, testModelConfig } from "@/lib/actions";
+import {
+  clearTtsCacheAction,
+  saveSettingsAction,
+  testModelConfig,
+  ttsCacheInfoAction,
+} from "@/lib/actions";
 import { getChineseVoices, speak } from "@/lib/tts";
 import type { AppSettings, TtsProvider } from "@/lib/settings";
 import type { ModelConfig } from "@/lib/types";
@@ -40,6 +45,11 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
   const [ttsTesting, setTtsTesting] = useState(false);
   const [ttsError, setTtsError] = useState("");
   const [ttsHint, setTtsHint] = useState("");
+  const [cacheInfo, setCacheInfo] = useState<{ files: number; bytes: number } | null>(null);
+
+  useEffect(() => {
+    ttsCacheInfoAction().then(setCacheInfo).catch(() => setCacheInfo({ files: 0, bytes: 0 }));
+  }, []);
 
   useEffect(() => {
     const load = () => setVoices(getChineseVoices());
@@ -337,6 +347,27 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           {ttsTesting && <span className="text-xs text-zinc-400">合成中…（自部署模型首次合成较慢）</span>}
           {ttsHint && <span className="text-xs text-emerald-600">{ttsHint}</span>}
           {ttsError && <span className="text-xs text-red-500">{ttsError}</span>}
+        </div>
+
+        <div className="mt-3 flex items-center gap-2 border-t border-zinc-100 pt-3 text-xs text-zinc-400">
+          <span>
+            语音缓存：
+            {cacheInfo
+              ? `${cacheInfo.files} 个文件 / ${(cacheInfo.bytes / 1024 / 1024).toFixed(1)} MB（200 MB 上限，超限自动清最旧）`
+              : "统计中…"}
+          </span>
+          <button
+            className="ml-auto text-zinc-400 hover:text-red-500 disabled:opacity-40"
+            disabled={pending || !cacheInfo || cacheInfo.files === 0}
+            onClick={() =>
+              startTransition(async () => {
+                await clearTtsCacheAction();
+                setCacheInfo(await ttsCacheInfoAction());
+              })
+            }
+          >
+            清空语音缓存
+          </button>
         </div>
       </section>
     </div>

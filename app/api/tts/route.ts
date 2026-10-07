@@ -1,5 +1,6 @@
 import { getCharacterCard } from "@/lib/memory";
 import { getSettings } from "@/lib/settings";
+import { ttsCacheKey, ttsCacheRead, ttsCacheWrite } from "@/lib/ttsCache";
 
 export const runtime = "nodejs";
 
@@ -7,7 +8,7 @@ const TIMEOUT_MS = 240_000;
 
 /**
  * 自部署 TTS 代理：浏览器 → /api/tts → GPT-SoVITS / OpenAI 兼容服务。
- * 绕开 CORS，密钥/内网地址不出服务端。
+ * 绕开 CORS，密钥/内网地址不出服务端；结果落磁盘缓存（命中响应头 x-himuro-tts-cache: hit）。
  *
  * 请求：{ text, characterId? }
  *   characterId 给定时优先用该角色自己的参考音频/语言配置（GPT-SoVITS 换 ref 即换音色），
@@ -36,6 +37,22 @@ export async function POST(req: Request) {
     }
   }
 
+  const ext = tts.provider === "openai" ? ".mp3" : ".wav";
+  const contentType = tts.provider === "openai" ? "audio/mpeg" : "audio/wav";
+  const key = ttsCacheKey(tts, text);
+  const cached = ttsCacheRead(key, ext);
+  if (cached) {
+    const body = new ArrayBuffer(cached.byteLength);
+    new Uint8Array(body).set(cached);
+    return new Response(body, {
+      headers: {
+        "content-type": contentType,
+        "cache-control": "no-store",
+        "x-himuro-tts-cache": "hit",
+      },
+    });
+  }
+
   try {
     if (tts.provider === "gptsovits") {
       if (!tts.baseUrl || !tts.refAudio) {
@@ -62,11 +79,13 @@ export async function POST(req: Request) {
           { status: 502 },
         );
       }
-      const audio = await upstream.arrayBuffer();
+      const audio = Buffer.from(await upstream.arrayBuffer());
+      ttsCacheWrite(key, ext, audio);
       return new Response(audio, {
         headers: {
-          "content-type": "audio/wav",
+          "content-type": contentType,
           "cache-control": "no-store",
+          "x-himuro-tts-cache": "miss",
         },
       });
     }
@@ -98,11 +117,13 @@ export async function POST(req: Request) {
           { status: 502 },
         );
       }
-      const audio = await upstream.arrayBuffer();
+      const audio = Buffer.from(await upstream.arrayBuffer());
+      ttsCacheWrite(key, ext, audio);
       return new Response(audio, {
         headers: {
-          "content-type": "audio/mpeg",
+          "content-type": contentType,
           "cache-control": "no-store",
+          "x-himuro-tts-cache": "miss",
         },
       });
     }

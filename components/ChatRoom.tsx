@@ -15,7 +15,8 @@ import {
   writeBackExample,
 } from "@/lib/actions";
 import { generateHook, distillWorldbookDraft } from "@/lib/story";
-import { speak, stopSpeak } from "@/lib/tts";
+import { currentProvider, downloadTts, speak, speakSegment, stopSpeak } from "@/lib/tts";
+import { splitSentences } from "@/lib/ttsText";
 import {
   EMOTION_PRESETS,
   GROUP_STRATEGY_LABEL,
@@ -27,6 +28,7 @@ import {
   type Tier,
   type WbCategory,
 } from "@/lib/types";
+import type { TtsProvider } from "@/lib/settings";
 import { badge, btnGhost, btnPrimary, card, input } from "@/lib/ui";
 
 type Msg = {
@@ -103,6 +105,16 @@ export default function ChatRoom({
   const [pending, startTransition] = useTransition();
   const router = useRouter();
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  /* TTS 分段面板状态：长文本逐段试听/下载 */
+  const [ttsProvider, setTtsProvider] = useState<TtsProvider>("browser");
+  const [ttsPanelFor, setTtsPanelFor] = useState<string | null>(null);
+  const [ttsSegments, setTtsSegments] = useState<string[]>([]);
+  const [ttsProgress, setTtsProgress] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTtsProvider(currentProvider());
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -338,6 +350,66 @@ export default function ChatRoom({
     });
   }
 
+  /* ---------------------------- TTS 逐段试听/下载 ---------------------------- */
+  function ttsOpts(m: Msg) {
+    return {
+      rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
+      pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
+      voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
+      characterId: m.characterId ?? character.id,
+      onProgress: (i: number, n: number) => setTtsProgress(`${i}/${n}`),
+    };
+  }
+
+  /** 短文本直接播；长文本展开逐段面板（GPT-SoVITS 长句合成又慢又差） */
+  async function handleListen(m: Msg) {
+    stopSpeak();
+    setTtsProgress(null);
+    const segs = splitSentences(m.content);
+    if (ttsProvider !== "browser" && segs.length > 2) {
+      setTtsSegments(segs);
+      setTtsPanelFor(m.id);
+      return;
+    }
+    try {
+      await speak(m.content, ttsOpts(m));
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "TTS 失败");
+    } finally {
+      setTtsProgress(null);
+    }
+  }
+
+  async function playSegment(m: Msg, seg: string) {
+    try {
+      await speakSegment(seg, ttsOpts(m));
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "TTS 失败");
+    }
+  }
+
+  async function downloadSegment(m: Msg, seg: string) {
+    try {
+      await downloadTts(seg, m.characterId ?? character.id);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "下载失败");
+    }
+  }
+
+  async function handleDownloadVoice(m: Msg) {
+    const segs = splitSentences(m.content);
+    if (segs.length > 2) {
+      setTtsSegments(segs);
+      setTtsPanelFor(ttsPanelFor === m.id ? null : m.id);
+      return;
+    }
+    try {
+      await downloadTts(m.content, m.characterId ?? character.id);
+    } catch (e) {
+      flash(e instanceof Error ? e.message : "下载失败");
+    }
+  }
+
   /* ------------------------------ 会话级切换 ------------------------------ */
   function patchConv(patch: Partial<Conv>) {
     setConv((c) => ({ ...c, ...patch }));
@@ -538,6 +610,44 @@ export default function ChatRoom({
                         {m.content}
                       </div>
                     )}
+                    {ttsPanelFor === m.id && (
+                      <div className="mt-1 rounded-xl border border-zinc-200 bg-zinc-50 p-2.5 text-left text-xs">
+                        <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                          <span className="font-medium text-zinc-600">
+                            逐段朗读{ttsProgress ? `（${ttsProgress}）` : ""}
+                          </span>
+                          <button className="text-indigo-500 hover:underline" onClick={() => handleListen(m)}>
+                            ▶ 全部播放
+                          </button>
+                          <button className="text-zinc-500 hover:underline" onClick={stopSpeak}>
+                            ⏹ 停止
+                          </button>
+                          <button
+                            className="ml-auto text-zinc-400 hover:text-zinc-600"
+                            onClick={() => {
+                              stopSpeak();
+                              setTtsPanelFor(null);
+                            }}
+                          >
+                            收起
+                          </button>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          {ttsSegments.map((seg, i) => (
+                            <div key={i} className="flex items-start gap-1.5">
+                              <span className="mt-0.5 shrink-0 text-zinc-400">{i + 1}.</span>
+                              <span className="min-w-0 flex-1 leading-relaxed text-zinc-600">{seg}</span>
+                              <button className="shrink-0 text-indigo-500" title="播放本段" onClick={() => playSegment(m, seg)}>
+                                ▶
+                              </button>
+                              <button className="shrink-0 text-zinc-400 hover:text-indigo-500" title="下载本段" onClick={() => downloadSegment(m, seg)}>
+                                ⬇
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {!isEditing && (
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
                         {(m.altCount ?? 1) > 1 && (
@@ -578,23 +688,16 @@ export default function ChatRoom({
                         </button>
                         <button
                           className="hover:text-indigo-500"
-                          onClick={async () => {
-                            stopSpeak();
-                            try {
-                              await speak(m.content, {
-                                rate: Number(localStorage.getItem("himuro-tts-rate")) || 1,
-                                pitch: Number(localStorage.getItem("himuro-tts-pitch")) || 1,
-                                voiceURI: localStorage.getItem("himuro-tts-voice") || undefined,
-                                characterId: m.characterId ?? character.id,
-                              });
-                            } catch (e) {
-                              flash(e instanceof Error ? e.message : "TTS 失败");
-                            }
-                          }}
+                          onClick={() => handleListen(m)}
                           title={m.characterId ? "用该角色自己的音色朗读" : undefined}
                         >
                           ▶ 试听
                         </button>
+                        {ttsProvider !== "browser" && (
+                          <button className="hover:text-indigo-500" title="下载语音文件" onClick={() => handleDownloadVoice(m)}>
+                            ⬇ 语音
+                          </button>
+                        )}
                         {m.role === "user" && (
                           <button className="hover:text-indigo-500" onClick={() => startEdit(m)}>
                             ✎ 编辑

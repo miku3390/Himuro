@@ -615,6 +615,19 @@ export async function saveSettingsAction(patch: Parameters<typeof saveSettings>[
   revalidatePath("/settings");
 }
 
+/* ============================ TTS 语音缓存 ============================ */
+
+export async function ttsCacheInfoAction(): Promise<{ files: number; bytes: number }> {
+  const { ttsCacheStats } = await import("@/lib/ttsCache");
+  return ttsCacheStats();
+}
+
+export async function clearTtsCacheAction() {
+  const { ttsCacheClear } = await import("@/lib/ttsCache");
+  ttsCacheClear();
+  revalidatePath("/settings");
+}
+
 /** 供设置页「测试连接」用：发一句 ping，返回首句或错误 */
 export async function testModelConfig(
   tier: "light" | "quality",

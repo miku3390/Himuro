@@ -162,7 +162,16 @@ db.prepare("DELETE FROM messages WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conv_members WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(gConvId);
 
-/* ---------- 5. 自部署 TTS 代理 ---------- */
+/* ---------- 5. 切句纯函数（Node 24 原生跑 TS） ---------- */
+const { splitSentences } = await import("../lib/ttsText.ts");
+const s1 = splitSentences("今天下午我们一起去秋叶原买新出的手办模型。晚上再看一直想看的电影。");
+ok(s1.length === 2 && s1[0].endsWith("。"), `按句末标点切分（${JSON.stringify(s1)}）`);
+const s2 = splitSentences("这是一个特别长的句子，".repeat(15), 100);
+ok(s2.length === 2 && s2.every((x) => x.length <= 100), `超长句在逗号处硬切且不超上限（${s2.length} 段）`);
+ok(splitSentences("你好呀。今天天气怎么样？走吧！").length === 1, "过短句子合并为一段");
+ok(splitSentences("   ").length === 0, "空文本返回空数组");
+
+/* ---------- 6. 自部署 TTS 代理 ---------- */
 const ttsCfg = db.prepare("SELECT tts_provider, tts_base_url FROM settings WHERE id=1").get();
 const gptReachable = await fetch("http://127.0.0.1:9880/docs")
   .then((r) => r.ok)
@@ -178,6 +187,20 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   const ct = ttsRes.headers.get("content-type") ?? "";
   const bytes = (await ttsRes.arrayBuffer()).byteLength;
   ok(ttsRes.ok && ct.startsWith("audio/") && bytes > 10000, `TTS 代理返回音频（${ct}, ${bytes} bytes）`);
+  const cacheHeader = ttsRes.headers.get("x-himuro-tts-cache");
+  ok(cacheHeader === "hit" || cacheHeader === "miss", `缓存头存在（${cacheHeader}）`);
+
+  // 同文本第二次请求应命中磁盘缓存
+  const ttsResAgain = await fetch("http://localhost:3000/api/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。" }),
+  });
+  const bytesAgain = (await ttsResAgain.arrayBuffer()).byteLength;
+  ok(
+    ttsResAgain.headers.get("x-himuro-tts-cache") === "hit" && bytesAgain === bytes,
+    "同文本第二次请求命中缓存（内容一致）",
+  );
 
   // 角色级覆盖：建一个带扇参考音频的临时角色，带 characterId 请求应同样出音频
   const ttsCharId = crypto.randomUUID();
