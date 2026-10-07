@@ -23,7 +23,7 @@ export type TtsCacheConfig = {
   voice: string;
 };
 
-export function ttsCacheKey(cfg: TtsCacheConfig, text: string): string {
+export function ttsCacheKey(cfg: TtsCacheConfig, text: string, speed?: number): string {
   return createHash("sha256")
     .update(
       JSON.stringify([
@@ -35,6 +35,7 @@ export function ttsCacheKey(cfg: TtsCacheConfig, text: string): string {
         cfg.promptLang,
         cfg.model,
         cfg.voice,
+        speed ?? null,
         text,
       ]),
     )

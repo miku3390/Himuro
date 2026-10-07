@@ -48,13 +48,11 @@ export function matchWorldbook(
 
 /* ------------------------------ 数据读取层 ------------------------------ */
 
-export function getCharacterCard(characterId: string): CharacterCard | null {
-  const row = db
-    .select()
-    .from(characters)
-    .where(eq(characters.id, characterId))
-    .get();
-  if (!row) return null;
+/**
+ * 唯一映射点：characters 行 → 卡片 DTO。
+ * 页面里各抄一份的写法会漏字段（加 tts_rate 时就漏了四处），统一走这里。
+ */
+export function cardFromRow(row: typeof characters.$inferSelect): CharacterCard {
   return {
     id: row.id,
     name: row.name,
@@ -73,7 +71,17 @@ export function getCharacterCard(characterId: string): CharacterCard | null {
     ttsPromptText: row.ttsPromptText,
     ttsPromptLang: row.ttsPromptLang,
     ttsLang: row.ttsLang,
+    ttsRate: row.ttsRate,
   };
+}
+
+export function getCharacterCard(characterId: string): CharacterCard | null {
+  const row = db
+    .select()
+    .from(characters)
+    .where(eq(characters.id, characterId))
+    .get();
+  return row ? cardFromRow(row) : null;
 }
 
 export function getWorldbookEntriesForCharacter(
@@ -234,9 +242,30 @@ export function getRecentMessages(
   limit = VERBATIM_WINDOW,
   excludeIds: string[] = [],
 ) {
+  // 活跃路径 + 排除要放在截窗之前：被替换的旧回复不该作为「自己上一句」进
+  // prompt，否则模型会照着它再答一遍（分支树下死分支本来就不在路径上）
   return getActivePath(conversationId)
     .filter((m) => !excludeIds.includes(m.id))
     .slice(-limit);
+}
+
+/**
+ * 把会话内的 idx 重排成 0..n-1 的稠密序号。
+ * 删除消息后不重排会留下空洞，而导出排序等按 idx 的展示会显得跳号。
+ * 个人使用规模下每条一次 UPDATE 完全可接受。
+ */
+export function renumberMessages(conversationId: string) {
+  const rows = db
+    .select({ id: messagesTable.id })
+    .from(messagesTable)
+    .where(eq(messagesTable.conversationId, conversationId))
+    .all();
+  rows.forEach((r, i) => {
+    db.update(messagesTable)
+      .set({ idx: i })
+      .where(eq(messagesTable.id, r.id))
+      .run();
+  });
 }
 
 export function getMessagesSince(conversationId: string, count: number) {

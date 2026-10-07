@@ -50,7 +50,7 @@ export type EngineParams = {
   embedMessageContent: string;
   /** 分支树：本条回复挂载的父消息 id（用户消息/上一发言者的回复；null = 成为根） */
   parentId: string | null;
-  /** 生成上下文时从活跃路径剔除的消息 id（重Roll 时 = 被替换的旧回复） */
+  /** 不进 prompt 的消息 id（重Roll 时那条旧回复：不该被自己看见） */
   contextExcludeIds?: string[];
 };
 

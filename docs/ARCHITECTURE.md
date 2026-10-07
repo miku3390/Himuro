@@ -28,7 +28,6 @@ Next.js 16 单进程（App Router）
       ├── settings.ts              设置读写
       ├── story.ts                 连载任务（钩子/提炼）
       ├── actions.ts               全部 Server Actions（CRUD）
-      ├── tts.ts                   浏览器语音（client-only）
       ├── types.ts                 前后端共享类型/常量
       └── ui.ts                    Tailwind 类名常量（全站观感）
 ```
@@ -48,24 +47,30 @@ Next.js 16 单进程（App Router）
 
 ```
 POST {conversationId, content, emotion}            普通发送
-POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重新生成；
+POST {conversationId, reroll:true, rerollMessageId?} 重Roll（重新生成被替换的那条；
                                                      末尾是用户消息时直接续写——编辑重发用）
- 1. 用户消息入库（reroll 则改为删除被替换的回复，含向量块）
- 2. 取最近 12 条原文（VERBATIM_WINDOW）
- 3. matchWorldbook：最近 8 条做关键词扫描 → 权重 top6 条目
- 4. searchVectorMemories：用户消息 Embedding → 余弦 top4（未配置则跳过）
- 5. buildSystemPrompt：角色卡五件套 + 示例对话 + 滚动摘要 + 世界书命中 + 向量回忆 + 模式指令 + 情绪目标
- 6. streamChat：OpenAI 兼容 /chat/completions stream=true，逐 token SSE 下发
+ 1. 先判发言者（群聊按策略，单聊固定会话角色）：没有可发言的成员就直接 400，
+    不留孤儿消息；重Roll 的落点只读不删
+ 2. 落库：普通发送插入用户消息；重Roll 不动库
+ 3. 取最近 12 条原文（VERBATIM_WINDOW；重Roll 时排除待替换的那条旧回复）
+ 4. matchWorldbook：最近 8 条做关键词扫描 → 权重 top6 条目
+ 5. searchVectorMemories：用户消息 Embedding → 余弦 top4（未配置则跳过）
+ 6. buildSystemPrompt：角色卡五件套 + 示例对话 + 滚动摘要 + 世界书命中 + 向量回忆 + 模式指令 + 情绪目标
+ 7. streamChat：OpenAI 兼容 /chat/completions stream=true，逐 token SSE 下发
     └─ baseUrl === "mock" → 内置演示模型（离线）
- 7. 完成后：assistant 消息入库 → 双条向量入库 → maybeUpdateSummary（该摘要则摘要）
- 8. SSE 事件：{t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"done", messageId, userMessageId} 落库完成
-    └─ userMessageId 必须回传：前端用它替换乐观插入的临时消息 id，否则后续「编辑/删除」找不到消息
+ 8. 完成后：assistant 消息入库 → 双条向量入库 → 重Roll 才在这里删掉被替换的旧回复（含向量块）并重排 idx
+    → maybeUpdateSummary（该摘要则摘要）
+ 9. SSE 事件：{t:"user_msg", id} → {t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"done", messageId, userMessageId}
+    └─ user_msg 开流就发：用户消息那一刻已经落库，前端拿真 id 替换乐观插入的临时 id；
+       流中断时 done 不会来，这条事件是「编辑/删除/星标」还能对上服务端行的唯一依据
+    └─ 出错：{t:"err", message}；此时用户消息仍保留，回复没有落库（重Roll 的旧回复也没被删）
 ```
 
 ### 群聊事件流（同一接口，会话成员 ≥2 时自动切换）
 
 ```
-{t:"speakers", speakers:[{characterId,name,emoji}]}   本轮发言者名单（策略选出）
+{t:"user_msg", id}                                    用户消息真 id（先于一切）
+  → {t:"speakers", speakers:[{characterId,name,emoji}]} 本轮发言者名单（策略选出）
   → 每位发言者依次：
     {t:"speaker", ...} → {t:"hits", speaker} → {t:"tok"}* → {t:"speaker_done", messageId}
   → {t:"done", userMessageId, summary}
@@ -85,13 +90,22 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
 ## TTS 链路（lib/tts.ts + app/api/tts/route.ts）
 
 ```
-聊天页「试听」/ 设置页「试听」
-  → lib/tts.ts speak()：读 localStorage 的 himuro-tts-provider
+聊天页「试听」/ 设置页「试听」/ 聊天页「导出配音」
+  → lib/tts.ts：读 localStorage 的 himuro-tts-provider
      ├─ browser → Web Speech API（离线，音色/语速/音调可调）
-     └─ gptsovits / openai → POST /api/tts {text, characterId?}
+     └─ gptsovits / openai → fetchSpeech() → POST /api/tts {text, characterId?, speed?}
           → 服务端按 settings.tts.* 组装上游请求（GPT-SoVITS POST /tts JSON；
-            OpenAI 兼容 POST /audio/speech）→ 音频字节流回传 → <audio> 播放
+            OpenAI 兼容 POST /audio/speech）→ 音频字节流回传
+          → 试听：<audio> 播放（同时只允许一段，新的先 abort 旧的）
+          → 导出：Blob 直接落成文件（不播放）
 ```
+
+- **语速**：一条链路一个旋钮。设置页 `settings.tts_rate` 同时喂 browser 的 `rate`、
+  GPT-SoVITS 的 `speed_factor`、OpenAI 的 `speed`；角色卡 `characters.tts_rate` 大于 0 时
+  覆盖全局（0 = 未配置）。服务端统一过 `clampTtsRate()` 夹到实测有效区间 0.6~1.65。
+- **导出配音**（v1.5）：聊天页把选中的角色回复逐条串行合成并按「序号-角色名.wav」下载。
+  两种范围——全部角色回复，或只导星标句（对应风月「语音只增强关键情绪节点」的口径）。
+  串行是刻意的：单卡 GPT-SoVITS 并发只会互相排队，还容易打满显存。
 
 - **角色级音色**（v1.4）：characters 表有 ttsRefAudio/ttsPromptText/ttsPromptLang/ttsLang 四个字段
   （角色编辑器「角色语音」区块），/api/tts 带 characterId 时逐字段覆盖全局配置，空字段回退。
@@ -101,7 +115,7 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（删旧回复重�
 - 供应商参数存 `settings` 表（保存时同步 localStorage 供聊天页免查询读取）。
 - 本机 WSL 预装了 GPT-SoVITS（忍野扇音色 v4 权重，**默认 GPT e20 + SoVITS e8**，用户 A/B 后选定，配置在 `~/GPT-SoVITS/GPT_SoVITS/configs/tts_infer.yaml`），启动命令：`wsl bash ~/GPT-SoVITS/start_api.sh`（监听 0.0.0.0:9880）。依赖的 NLTK 数据（cmudict、averaged_perceptron_tagger*）已在 `~/nltk_data` 就位。
 - 种子默认 provider=gptsovits 并预填扇的参考音频；服务未启动时试听会报错，可切回 browser。
-- Phase 3：按角色换参考音频（GPT-SoVITS 换 ref 即换音色）、批量导出、逐句高潮配音。
+- Phase 3 待做：把 GPT-SoVITS 的更多采样参数（`top_k` / `temperature` / `seed`）暴露出来；逐句高潮配音的自动选点（现在靠人工星标）。
 
 客户端（components/ChatRoom.tsx）用 fetch + ReadableStream 解析 SSE，不依赖 EventSource（因为要 POST）。
 

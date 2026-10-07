@@ -5,10 +5,12 @@
 ## 环境准备
 
 ```bash
-npm install
+npm install        # 根目录 .npmrc 已关掉安装期脚本（依赖自带预编译产物）
 npm run dev        # http://localhost:3000，热更新
-npm run lint && npx tsc --noEmit   # 提交前跑这两个
+npm run lint && npm run typecheck   # 提交前跑这两个
 ```
+
+- `npm run typecheck` = `next typegen && tsc --noEmit`。干净 clone 上必须先 typegen：`app/layout.tsx` 用的 `LayoutProps` 是 Next 生成的全局类型，`.next` 与 `next-env.d.ts` 都在 .gitignore 里，直接 `tsc --noEmit` 会报 `Cannot find name 'LayoutProps'`。
 
 - 数据库 `data/himuro.db` 首次启动自动创建 + 迁移 + 种子。改了 `lib/db/schema.ts` 后跑 `npx drizzle-kit generate` 生成迁移文件（提交进仓库），下次启动自动应用。
 - 重置出厂：停服 → 删 `data/` → 重启。

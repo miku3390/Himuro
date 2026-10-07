@@ -25,6 +25,13 @@
 wsl bash ~/GPT-SoVITS/start_api.sh     # 启动（脚本自带 pkill 防重复；约 10~20 秒就绪）
 ```
 
+> **启动后进程会随 WSL 会话一起消失**（实测 2026-10-06）：`start_api.sh` 里是 `nohup … &`，
+> 但那次 `wsl bash` 调用一结束，WSL 实例回收，nohup 的子进程也一起没了 —— 表现为
+> 脚本打印「API starting...」后 `9880` 永远连不上、`/tmp/tts_api.log` 甚至不存在。
+> 可靠起法：让那次 `wsl` 调用一直活着，例如
+> `wsl bash -c "bash ~/GPT-SoVITS/start_api.sh; sleep 3600"`（放后台跑），
+> 或者在另一个窗口先 `wsl` 进去再执行脚本。
+
 - 健康检查：`curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9880/docs` 返回 200 即就绪
 - 日志：WSL 内 `tail -f /tmp/tts_api.log`
 - 停止：`wsl bash -c "pkill -f api_v2.py"`
@@ -115,7 +122,7 @@ prompt_lang:    ja
 
 ## 5. Himuro 的集成点（在 Himuro 上开发时需要知道）
 
-- Himuro（`D:\Desktop\GLM-d4\production\Himuro`，Next.js，http://localhost:3000）通过**服务端代理** `POST /api/tts {text, characterId?}` 调本服务，浏览器不直连 9880（绕 CORS、不暴露内网地址）
+- Himuro（`D:\Desktop\DSH-d4\Himuro`，Next.js，http://localhost:3000）通过**服务端代理** `POST /api/tts {text, characterId?}` 调本服务，浏览器不直连 9880（绕 CORS、不暴露内网地址）
 - 供应商配置存 Himuro 的 SQLite `settings` 表（`ttsProvider=ttsBaseUrl/ttsLang/ttsRefAudio/ttsPromptText/ttsPromptLang`），设置页可视化编辑
 - `characterId` 给定时优先用该角色自己的参考音频（`characters` 表 `ttsRefAudio` 等四字段），空字段逐项回退全局 → **换音色 = 在角色卡里填另一个参考音频路径**
 - Himuro 侧代码：`lib/tts.ts`（客户端）、`app/api/tts/route.ts`（代理）、`lib/settings.ts`

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
+import { renumberMessages } from "@/lib/memory";
 import {
   characters,
   conversations,
@@ -21,6 +22,7 @@ import {
 } from "@/lib/branch";
 import { saveSettings, getSettings } from "@/lib/settings";
 import {
+  clampTtsRate,
   parseExamples,
   type CharacterCard,
   type Example,
@@ -62,6 +64,8 @@ function upsertCharacterValues(input: CharacterInput) {
     ttsPromptText: input.ttsPromptText ?? "",
     ttsPromptLang: input.ttsPromptLang ?? "",
     ttsLang: input.ttsLang ?? "",
+    // 0 = 未配置（回退全局）；顺手把越界值夹到实测有效区间
+    ttsRate: clampTtsRate(input.ttsRate ?? 0, true),
   };
 }
 
@@ -493,6 +497,8 @@ export async function deleteMessageTree(messageId: string) {
       db.update(conversations).set({ activeRootId: null }).where(eq(conversations.id, conv.id)).run();
     }
   }
+  // 子树删完把剩余消息的 idx 重排回稠密序号（导出排序等按 idx 展示的场景）
+  renumberMessages(m.conversationId);
   revalidatePath(`/chat/${m.conversationId}`);
 }
 

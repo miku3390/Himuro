@@ -13,7 +13,7 @@
 | 长会话记忆 | 三层：滚动摘要（轻量模型自动压缩）+ 世界书关键词注入 + 可选向量检索 |
 | 日常聊天 / 连载剧情双模式 | 日常：情绪目标快捷 chips（安慰/斗嘴/并肩作战…）；连载：章节号、章末「下一章钩子」、一键提炼状态回写世界书 |
 | 模型轻量/高质量两档 | 会话级切换，三组 OpenAI 兼容配置（轻量/高质量/Embedding） |
-| 语音（基底音色+参数微调+试听） | 三供应商：浏览器内置（离线）/ **GPT-SoVITS api_v2**（自部署）/ OpenAI 兼容；服务端代理 /api/tts；**支持按角色配参考音频（=专属音色），未配置回退全局**。本机默认预填 WSL 里的忍野扇音色 |
+| 语音（基底音色+参数微调+试听+批量导出） | 三供应商：浏览器内置（离线）/ **GPT-SoVITS api_v2**（自部署）/ OpenAI 兼容；服务端代理 /api/tts；**支持按角色配参考音频（=专属音色）与语速覆盖，未配置回退全局**；**导出配音**可导全部角色回复或仅星标句。本机默认预填 WSL 里的忍野扇音色 |
 | 对话导出复盘 + 回写角色卡 | 导出 TXT/JSON；消息星标；「存为示例」把满意对话写回角色卡 |
 | —— v1.1 新增 —— | |
 | 消息重Roll / 编辑重发 / 删除 | 回复不满意一键重抽；编辑用户消息后截断并重新生成 |
@@ -29,6 +29,8 @@ npm run dev        # 开发模式，http://localhost:3000
 # 或
 npm run build && npm start   # 生产模式
 ```
+
+> 仓库根有 `.npmrc` 设了 `ignore-scripts=true`：依赖（better-sqlite3 等）自带预编译产物，不需要安装期脚本，而 better-sqlite3 包内有 `binding.gyp` 会触发 node-gyp 编译，在没有 Visual Studio 的机器上直接装不上。将来引入需要编译期脚本的依赖时，用 `npm rebuild <包名> --foreground-scripts` 单独放行。
 
 **无需任何配置即可运行**：默认使用内置「演示模型」（离线角色扮演假回复），用来熟悉流程和测试功能。
 
@@ -57,3 +59,7 @@ npm run build && npm start   # 生产模式
 ## 技术栈
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · SQLite (better-sqlite3 + Drizzle ORM) · OpenAI 兼容 API 直连（无 SDK 依赖）
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。代码全部自有；角色卡/世界书/记忆等功能形态参考「AI风月」的公开文档与教程，未使用其任何代码。

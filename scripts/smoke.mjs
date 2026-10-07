@@ -32,9 +32,13 @@ const kinds = [...new Set(first.events.map((e) => e.t))];
 const hits = first.events.find((e) => e.t === "hits")?.hits ?? [];
 const reply1 = first.events.find((e) => e.t === "done");
 ok(first.res.status === 200, "聊天 HTTP 200");
-ok(kinds.join("→") === "hits→tok→done", `事件序列 hits→tok→done（实际 ${kinds.join("→")}）`);
+ok(kinds.join("→") === "user_msg→hits→tok→done", `事件序列 user_msg→hits→tok→done（实际 ${kinds.join("→")}）`);
 ok(hits.some((h) => h.title === "周六看海的约定"), "世界书命中「周六看海的约定」");
 ok(!!reply1?.messageId, "回复落库");
+ok(
+  first.events[0]?.t === "user_msg" && first.events[0]?.id === reply1?.userMessageId,
+  "开头的 user_msg 给出了用户消息真 id（流中断时客户端靠它才能继续编辑/删除）",
+);
 
 const count1 = () => db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(convId).n;
 ok(count1() === 2, `消息数=2（实际 ${count1()}）`);
@@ -157,6 +161,24 @@ const assistantCount = db
   .get(gConvId).n;
 ok(assistantCount === 4, `群聊共 4 条角色回复（实际 ${assistantCount}）`);
 
+// 4d. 群聊重Roll：即使群策略是 all，也只让原发言人重答；分支树不删旧回复（消息数 +1）
+const gTarget = db
+  .prepare("SELECT id FROM messages WHERE conversation_id=? AND role='assistant' ORDER BY idx")
+  .all(gConvId)
+  .at(-1);
+const gMsgCountBefore = db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(gConvId).n;
+const g4 = await chat({ conversationId: gConvId, reroll: true, rerollMessageId: gTarget.id });
+const spk4 = g4.events.filter((e) => e.t === "speakers").at(-1)?.speakers ?? [];
+ok(spk4.length === 1, `群聊重Roll 只让原发言人重答（实际 ${spk4.map((s) => s.name).join(",") || "无人"}）`);
+const gMsgCountAfter = db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(gConvId).n;
+ok(gMsgCountAfter === gMsgCountBefore + 1, `群聊重Roll 生成兄弟分支（${gMsgCountBefore} → ${gMsgCountAfter}）`);
+const gNew = db
+  .prepare("SELECT parent_id, character_id FROM messages WHERE conversation_id=? AND id != ?")
+  .all(gConvId, gTarget.id)
+  .at(-1);
+ok(gNew?.parent_id === db.prepare("SELECT parent_id FROM messages WHERE id=?").get(gTarget.id).parent_id,
+  "群聊重Roll 的新回复与旧回复同父（兄弟分支）");
+
 // 清理群聊
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(gConvId);
 db.prepare("DELETE FROM conv_members WHERE conversation_id=?").run(gConvId);
@@ -182,7 +204,7 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   const ttsRes = await fetch("http://localhost:3000/api/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。" }),
+    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。", speed: 0.9 }), // 语速走 speed_factor，服务端会夹到 0.6~1.65
   });
   const ct = ttsRes.headers.get("content-type") ?? "";
   const bytes = (await ttsRes.arrayBuffer()).byteLength;
@@ -194,7 +216,7 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   const ttsResAgain = await fetch("http://localhost:3000/api/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。" }),
+    body: JSON.stringify({ text: "冒烟测试，忍野扇的语音。", speed: 0.9 }),
   });
   const bytesAgain = (await ttsResAgain.arrayBuffer()).byteLength;
   ok(
@@ -205,7 +227,7 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   // 角色级覆盖：建一个带扇参考音频的临时角色，带 characterId 请求应同样出音频
   const ttsCharId = crypto.randomUUID();
   db.prepare(
-    "INSERT INTO characters (id, name, identity, tts_ref_audio, tts_prompt_text, tts_prompt_lang, tts_lang, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?,?,0,?,?)",
+    "INSERT INTO characters (id, name, identity, tts_ref_audio, tts_prompt_text, tts_prompt_lang, tts_lang, tts_rate, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?)",
   ).run(
     ttsCharId,
     "TTS测试角色",
@@ -214,6 +236,7 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
     "しかしそれはともかくとして、あららぎ先輩、仲間を頼るのは悪いことではありませんが",
     "ja",
     "zh",
+    1.4,
     now,
     now,
   );
@@ -224,7 +247,26 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   });
   const ct2 = ttsRes2.headers.get("content-type") ?? "";
   const bytes2 = (await ttsRes2.arrayBuffer()).byteLength;
-  ok(ttsRes2.ok && ct2.startsWith("audio/") && bytes2 > 10000, `角色级 TTS 覆盖生效（${ct2}, ${bytes2} bytes）`);
+  ok(ttsRes2.ok && ct2.startsWith("audio/") && bytes2 > 10000, `角色级 TTS 覆盖（音色+语速 1.4）生效（${ct2}, ${bytes2} bytes）`);
+
+  // 语速真的传到了模型：同一句话，慢速档的音频必须比快速档长
+  const wavSeconds = (buf) => {
+    const sr = buf.readUInt32LE(24);
+    const ch = buf.readUInt16LE(22);
+    const bits = buf.readUInt16LE(34);
+    return (buf.length - 44) / (sr * ch * (bits / 8));
+  };
+  const synthAt = async (speed) => {
+    const r = await fetch("http://localhost:3000/api/tts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "你好，我是忍野扇。", speed }),
+    });
+    return wavSeconds(Buffer.from(await r.arrayBuffer()));
+  };
+  const slow = await synthAt(0.7);
+  const fast = await synthAt(1.5);
+  ok(slow > fast, `语速生效：0.7x 比 1.5x 长（${slow.toFixed(2)}s vs ${fast.toFixed(2)}s）`);
   db.prepare("DELETE FROM characters WHERE id=?").run(ttsCharId);
 }
 

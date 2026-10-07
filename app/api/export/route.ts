@@ -82,7 +82,11 @@ export async function GET(req: Request) {
               relationship: card.relationship,
             }
           : null,
-        model: conv.tier === "quality" ? settings.quality : settings.light,
+        // 只写档位与模型名：导出文件要拿出去归档/分享，apiKey 不能跟着走
+        model: {
+          tier: conv.tier,
+          name: (conv.tier === "quality" ? settings.quality : settings.light).model,
+        },
         messages: rows.map((m) => ({
           role: m.role,
           speaker: m.role === "assistant" ? (m.characterId ? (nameById[m.characterId] ?? null) : (card?.name ?? null)) : null,

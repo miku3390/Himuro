@@ -24,14 +24,16 @@ export const maxDuration = 300;
  *
  * 请求：{ conversationId, content, emotion? }
  *      或重Roll：{ conversationId, reroll: true, rerollMessageId? }
- *      （v1.5 分支树：重Roll 不再删除旧回复，新回复作为兄弟分支挂到同一父节点下，
- *        旧分支保留可切回；rerollMessageId 是要重Roll 的那条回复；不传则对活跃路径
- *        末尾操作——末尾是用户消息时直接续写，这是编辑重发走的路径）
+ *      （v1.5 分支树：重Roll 不删除旧回复，新回复作为兄弟分支挂到同一父节点下，
+ *        旧分支保留可切回；被替换的那条会从 prompt 窗口剔除。rerollMessageId 是要
+ *        重Roll 的那条回复；不传则对活跃路径末尾操作——末尾是用户消息时直接续写，
+ *        这是编辑重发走的路径）
  *
- * 单聊事件：{t:"hits"} → {t:"tok"}* → {t:"done", messageId, userMessageId, summary}
- * 群聊事件：{t:"speakers", speakers:[…]} → ({t:"speaker"} → {t:"hits"} → {t:"tok"}* →
- *           {t:"speaker_done", messageId})* → {t:"done", userMessageId, summary}
+ * 单聊事件：{t:"user_msg", id} → {t:"hits"} → {t:"tok"}* → {t:"done", messageId, userMessageId, summary}
+ * 群聊事件：{t:"user_msg", id} → {t:"speakers", speakers:[…]} → ({t:"speaker"} → {t:"hits"} →
+ *           {t:"tok"}* → {t:"speaker_done", messageId})* → {t:"done", userMessageId, summary}
  *           被选中的发言者按顺序逐个生成，后发言者能看到前者本轮的发言。
+ * 出错事件：{t:"err", message, userMessageId}（用户消息在流开始前已落库，真 id 随事件带回）
  */
 export async function POST(req: Request) {
   const body = (await req.json()) as {
@@ -69,14 +71,14 @@ export async function POST(req: Request) {
     }
   }
 
-  // 1. 分支树定位 + 落库。
-  //    活跃路径叶子决定挂载点：普通发送 → 用户消息挂在叶子下；
-  //    重Roll → 不再删除旧回复，新回复作为「兄弟分支」挂到被替换消息的父节点下；
+  // 1. 分支树定位：活跃路径叶子决定挂载点。
+  //    普通发送 → 用户消息挂在叶子下（确认有可发言者后才落库，不留孤儿行）；
+  //    重Roll → 不删除旧回复，新回复作为「兄弟分支」挂到被替换消息的父节点下，
+  //    被替换的那条从 prompt 窗口里剔除，否则模型看见自己上一句会照着再答一遍；
   //    编辑重发（末尾是用户消息）→ 直接续写为该用户消息的子分支。
   const path = getActivePath(conversationId);
   const leaf = path.at(-1);
 
-  let userMsgId = "__reroll__";
   let rerollSpeakerId: string | null = null;
   /** 本轮第一条回复的挂载父消息；null = 成为根（空会话/根级重Roll） */
   let firstReplyParentId: string | null;
@@ -105,6 +107,39 @@ export async function POST(req: Request) {
       firstReplyParentId = leaf?.id ?? null;
     }
   } else {
+    firstReplyParentId = leaf?.id ?? null;
+  }
+
+  // 2. 确定本轮发言者（群聊按策略；单聊固定为会话角色）
+  const lastSpeaker = lastSpeakerCharacterId(conversationId);
+  const singleCard = isGroup ? null : getCharacterCard(conv.characterId)!;
+  const singleEntries = isGroup ? [] : getWorldbookEntriesForCharacter(conv.characterId).entries;
+
+  const speakers = isGroup
+    ? selectSpeakers(
+        (conv.groupStrategy as GroupStrategy) ?? "mention",
+        members,
+        content,
+        lastSpeaker,
+        rerollSpeakerId,
+      )
+    : [
+        {
+          characterId: conv.characterId,
+          sort: 0,
+          card: singleCard!,
+          entries: singleEntries,
+        },
+      ];
+
+  // 先判定再落库：没有可发言的成员时直接 400，不给用户消息留下孤儿行
+  if (speakers.length === 0) {
+    return Response.json({ error: "没有可发言的成员" }, { status: 400 });
+  }
+
+  // 3. 落库：普通发送插入用户消息（挂在活跃路径叶子下）；重Roll 不动库（旧分支保留）
+  let userMsgId = "";
+  if (!isReroll) {
     userMsgId = crypto.randomUUID();
     db.insert(messagesTable)
       .values({
@@ -132,32 +167,6 @@ export async function POST(req: Request) {
     .where(eq(conversations.id, conversationId))
     .run();
 
-  // 2. 确定本轮发言者（群聊按策略；单聊固定为会话角色）
-  const lastSpeaker = lastSpeakerCharacterId(conversationId);
-  const singleCard = isGroup ? null : getCharacterCard(conv.characterId)!;
-  const singleEntries = isGroup ? [] : getWorldbookEntriesForCharacter(conv.characterId).entries;
-
-  const speakers = isGroup
-    ? selectSpeakers(
-        (conv.groupStrategy as GroupStrategy) ?? "mention",
-        members,
-        content,
-        lastSpeaker,
-        rerollSpeakerId,
-      )
-    : [
-        {
-          characterId: conv.characterId,
-          sort: 0,
-          card: singleCard!,
-          entries: singleEntries,
-        },
-      ];
-
-  if (speakers.length === 0) {
-    return Response.json({ error: "没有可发言的成员" }, { status: 400 });
-  }
-
   const memberNameById: Record<string, string> = {};
   if (isGroup) {
     for (const m of members) memberNameById[m.characterId] = m.card.name;
@@ -176,6 +185,10 @@ export async function POST(req: Request) {
       // 群聊一轮多个发言者按顺序链式挂接（B 的父是 A），保证「单活跃子指针」路径完整
       let prevReplyParentId: string | null = firstReplyParentId;
       try {
+        // 先把手里的用户消息真 id 发出去：流中断时客户端也不会拿着一个伪造 id
+        // 去执行编辑/删除/星标（那些操作都按 id 找服务端的行）
+        if (userMsgId) emit({ t: "user_msg", id: userMsgId });
+
         if (isGroup) {
           emit({
             t: "speakers",
@@ -221,6 +234,7 @@ export async function POST(req: Request) {
             emit({ t: "speaker_done", characterId: sp.card.id, messageId: r.assistantId });
           }
         }
+
 
         // 记忆更新（失败不阻塞回复展示）
         let summaryText = conv.summaryText;

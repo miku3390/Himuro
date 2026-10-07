@@ -2,7 +2,7 @@ import { desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { characters, conversations } from "@/lib/db/schema";
 import HomeClient from "@/components/HomeClient";
-import { parseExamples } from "@/lib/types";
+import { cardFromRow } from "@/lib/memory";
 
 export const dynamic = "force-dynamic";
 
@@ -26,26 +26,7 @@ export default function HomePage() {
     .orderBy(desc(conversations.updatedAt))
     .all();
 
-  const mapCard = (c: (typeof allChars)[number]) => ({
-    id: c.id,
-    name: c.name,
-    emoji: c.emoji,
-    color: c.color,
-    identity: c.identity,
-    speechStyle: c.speechStyle,
-    values: c.values,
-    boundaries: c.boundaries,
-    userAddressing: c.userAddressing,
-    relationship: c.relationship,
-    firstMessage: c.firstMessage,
-    examples: parseExamples(c.examplesJson),
-    isTemplate: c.isTemplate === 1,
-    hasWorldbook: true,
-    ttsRefAudio: c.ttsRefAudio,
-    ttsPromptText: c.ttsPromptText,
-    ttsPromptLang: c.ttsPromptLang,
-    ttsLang: c.ttsLang,
-  });
+  const mapCard = (c: (typeof allChars)[number]) => cardFromRow(c);
 
   return (
     <HomeClient

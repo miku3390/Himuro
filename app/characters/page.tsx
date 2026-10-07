@@ -2,6 +2,7 @@ import { desc } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { characters, worldbooks } from "@/lib/db/schema";
 import CharactersClient from "@/components/CharactersClient";
+import { cardFromRow } from "@/lib/memory";
 
 export const dynamic = "force-dynamic";
 
@@ -11,24 +12,8 @@ export default function CharactersPage() {
   const wbByChar = new Map(wbs.map((w) => [w.characterId, w.id]));
 
   const map = (c: (typeof rows)[number]) => ({
-    id: c.id,
-    name: c.name,
-    emoji: c.emoji,
-    color: c.color,
-    identity: c.identity,
-    speechStyle: c.speechStyle,
-    values: c.values,
-    boundaries: c.boundaries,
-    userAddressing: c.userAddressing,
-    relationship: c.relationship,
-    firstMessage: c.firstMessage,
-    examples: [],
-    isTemplate: c.isTemplate === 1,
+    ...cardFromRow(c),
     worldbookId: wbByChar.get(c.id) ?? null,
-    ttsRefAudio: c.ttsRefAudio,
-    ttsPromptText: c.ttsPromptText,
-    ttsPromptLang: c.ttsPromptLang,
-    ttsLang: c.ttsLang,
   });
 
   return (
