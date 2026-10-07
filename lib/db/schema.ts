@@ -101,6 +101,8 @@ export const conversations = sqliteTable("conversations", {
   summarizedCount: integer("summarized_count").notNull().default(0),
   /** 群聊发言策略：mention=谁被@谁答 rotate=依次发言 all=全员发言；null=非群聊 */
   groupStrategy: text("group_strategy"),
+  /** 分支树：活跃根消息 id；null = 取 idx 最小的根（旧数据天然兼容） */
+  activeRootId: text("active_root_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -124,6 +126,10 @@ export const messages = sqliteTable("messages", {
   content: text("content").notNull(),
   /** 群聊中的发言人（assistant 消息）；null = 单聊角色或用户消息 */
   characterId: text("character_id"),
+  /** 分支树：父消息 id（null = 会话根，通常只有开场白/首条） */
+  parentId: text("parent_id"),
+  /** 分支树：当前活跃的子分支 id；null = 取 idx 最大的孩子（旧数据天然兼容） */
+  activeChildId: text("active_child_id"),
   /** 用户本轮的情绪目标（日常模式），如：安慰/斗嘴/并肩作战/自定义 */
   emotion: text("emotion"),
   /** 复盘星标：标出满意的回复，用于回写角色卡 */

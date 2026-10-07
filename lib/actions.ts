@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   characters,
@@ -12,6 +12,13 @@ import {
   wbVersions,
   worldbooks,
 } from "@/lib/db/schema";
+import {
+  alternativesOf,
+  altKeyOf,
+  getAllMessages,
+  nextIdx,
+  subtreeIds,
+} from "@/lib/branch";
 import { saveSettings, getSettings } from "@/lib/settings";
 import {
   parseExamples,
@@ -445,65 +452,142 @@ export async function toggleStar(messageId: string) {
     .run();
 }
 
-/** 删除单条消息（含其向量块）；idx 出现空洞不影响排序 */
-export async function deleteMessage(messageId: string) {
+/**
+ * 删除消息及其整个子树（含向量块）。
+ * 若父消息/会话的活跃分支指针指向被删节点，则回落到幸存兄弟（或置空走默认）。
+ */
+export async function deleteMessageTree(messageId: string) {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m) return;
   const { msgChunks } = await import("@/lib/db/schema");
-  db.delete(msgChunks).where(eq(msgChunks.messageId, messageId)).run();
-  db.delete(messagesTable).where(eq(messagesTable.id, messageId)).run();
+  const allRows = getAllMessages(m.conversationId);
+  const ids = subtreeIds(messageId, allRows);
+  const idSet = new Set(ids);
+  for (const id of ids) db.delete(msgChunks).where(eq(msgChunks.messageId, id)).run();
+  db.delete(messagesTable).where(inArray(messagesTable.id, ids)).run();
+
+  if (m.parentId) {
+    const parent = db
+      .select()
+      .from(messagesTable)
+      .where(eq(messagesTable.id, m.parentId))
+      .get();
+    // 子树外的消息只有 parent 的活跃指针可能指进被删集合（且只能指向 m 自己）
+    if (parent?.activeChildId && idSet.has(parent.activeChildId)) {
+      const survivors = allRows
+        .filter((r) => !idSet.has(r.id) && altKeyOf(r) === altKeyOf(m))
+        .sort((a, b) => a.idx - b.idx);
+      const fallback = survivors.at(-1);
+      db.update(messagesTable)
+        .set({ activeChildId: fallback?.id ?? null })
+        .where(eq(messagesTable.id, parent.id))
+        .run();
+    }
+  } else {
+    const conv = db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, m.conversationId))
+      .get();
+    if (conv?.activeRootId && idSet.has(conv.activeRootId)) {
+      db.update(conversations).set({ activeRootId: null }).where(eq(conversations.id, conv.id)).run();
+    }
+  }
+  revalidatePath(`/chat/${m.conversationId}`);
 }
 
 /**
- * 编辑用户消息并截断其后所有消息（分叉的简化形态）。
- * 返回 conversationId，客户端随后对末尾发起重Roll 重新生成回复。
+ * 编辑用户消息 → 新建兄弟分支（v1.5 分支树：旧分支连同其后的回复原样保留）。
+ * 返回新用户消息 id，客户端随后发起续写生成新回复。
  */
-export async function editUserMessageAndTruncate(
+export async function editUserMessageBranch(
   messageId: string,
   newContent: string,
-): Promise<{ conversationId: string }> {
+): Promise<{ conversationId: string; newUserMessageId: string }> {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m) throw new Error("消息不存在");
   if (m.role !== "user") throw new Error("只能编辑用户消息");
   const content = newContent.trim();
   if (!content) throw new Error("内容不能为空");
 
-  const { msgChunks } = await import("@/lib/db/schema");
-  // 按 idx 删除该消息之后的所有消息（含向量块）
-  const rows = db
-    .select({ id: messagesTable.id, idx: messagesTable.idx })
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, m.conversationId))
-    .all();
-  for (const r of rows) {
-    if (r.idx > m.idx) {
-      db.delete(msgChunks).where(eq(msgChunks.messageId, r.id)).run();
-      db.delete(messagesTable).where(eq(messagesTable.id, r.id)).run();
-    }
-  }
-  db.update(messagesTable)
-    .set({ content })
-    .where(eq(messagesTable.id, messageId))
+  const newUserMessageId = uid();
+  db.insert(messagesTable)
+    .values({
+      id: newUserMessageId,
+      conversationId: m.conversationId,
+      idx: nextIdx(m.conversationId),
+      role: "user",
+      content,
+      characterId: null,
+      parentId: m.parentId,
+      emotion: m.emotion,
+      createdAt: now(),
+    })
     .run();
+  if (m.parentId) {
+    db.update(messagesTable)
+      .set({ activeChildId: newUserMessageId })
+      .where(eq(messagesTable.id, m.parentId))
+      .run();
+  } else {
+    // 根级用户消息（无开场白的会话首条）→ 更新会话的活跃根
+    db.update(conversations)
+      .set({ activeRootId: newUserMessageId })
+      .where(eq(conversations.id, m.conversationId))
+      .run();
+  }
   db.update(conversations)
     .set({ updatedAt: now() })
     .where(eq(conversations.id, m.conversationId))
     .run();
   revalidatePath(`/chat/${m.conversationId}`);
-  return { conversationId: m.conversationId };
+  return { conversationId: m.conversationId, newUserMessageId };
+}
+
+/** 分支切换：在兄弟备选组里移动 delta 步，把父消息（或会话）的活跃指针指过去 */
+export async function switchAlternative(messageId: string, delta: number) {
+  const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
+  if (!m) return;
+  const group = alternativesOf(m, getAllMessages(m.conversationId));
+  if (group.length < 2) return;
+  const i = group.findIndex((x) => x.id === m.id);
+  const next = group[(i + delta + group.length) % group.length] ?? m;
+  if (next.id === m.id) return;
+  if (m.parentId) {
+    db.update(messagesTable)
+      .set({ activeChildId: next.id })
+      .where(eq(messagesTable.id, m.parentId))
+      .run();
+  } else {
+    db.update(conversations)
+      .set({ activeRootId: next.id, updatedAt: now() })
+      .where(eq(conversations.id, m.conversationId))
+      .run();
+  }
+  revalidatePath(`/chat/${m.conversationId}`);
 }
 
 /** 复盘回写：把某条满意回复 + 它前面的用户输入，存进角色卡示例对话（群聊时写入发言人自己的卡） */
 export async function writeBackExample(messageId: string) {
   const m = db.select().from(messagesTable).where(eq(messagesTable.id, messageId)).get();
   if (!m || m.role !== "assistant") throw new Error("只能回写角色回复");
-  const prev = db
-    .select()
-    .from(messagesTable)
-    .where(
-      and(eq(messagesTable.conversationId, m.conversationId), eq(messagesTable.idx, m.idx - 1)),
-    )
-    .get();
+
+  // 分支树：沿父链向上找最近的用户输入（群聊同轮多个发言者共享同一条用户消息）
+  let prevUserContent: string | null = null;
+  let cursor: typeof m | undefined = m;
+  while (cursor?.parentId) {
+    const p = db
+      .select()
+      .from(messagesTable)
+      .where(eq(messagesTable.id, cursor.parentId))
+      .get();
+    if (!p) break;
+    if (p.role === "user") {
+      prevUserContent = p.content;
+      break;
+    }
+    cursor = p;
+  }
 
   const conv = db.select().from(conversations).where(eq(conversations.id, m.conversationId)).get();
   if (!conv) throw new Error("会话不存在");
@@ -513,7 +597,7 @@ export async function writeBackExample(messageId: string) {
 
   const examples = parseExamples(card.examplesJson);
   examples.push({
-    user: prev?.role === "user" ? prev.content : "（用户未发言）",
+    user: prevUserContent ?? "（用户未发言）",
     assistant: m.content,
   });
   if (examples.length > 5) examples.shift(); // 风月口径：3-5 组

@@ -9,6 +9,7 @@ import {
   wbEntries,
   worldbooks,
 } from "@/lib/db/schema";
+import { getActivePath } from "@/lib/branch";
 import { chatComplete, cosineSim, embedTexts } from "@/lib/llm";
 import { buildSummaryMessages } from "@/lib/prompt";
 import { getSettings, modelFor } from "@/lib/settings";
@@ -123,11 +124,9 @@ export async function maybeUpdateSummary(conversationId: string) {
     .get();
   if (!conv) return;
 
-  const all = db
-    .select({ id: messagesTable.id, content: messagesTable.content })
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, conversationId))
-    .all();
+  // 只摘要活跃路径：死分支的历史不该推进摘要进度
+  // （切换分支后 summarizedCount 可能与新路径错位，最多多/少摘要一次，下轮自愈）
+  const all = getActivePath(conversationId);
 
   const s = getSettings();
   const toSummarizeCount = all.length - VERBATIM_WINDOW;
@@ -228,23 +227,20 @@ function safeParseVector(json: string): number[] {
 }
 
 /* --------------------------- 会话消息窗口工具 --------------------------- */
+// 全部基于「活跃路径」：分支树下一律不把死分支的历史混进 prompt/摘要
 
-export function getRecentMessages(conversationId: string, limit = VERBATIM_WINDOW) {
-  const rows = db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, conversationId))
-    .all();
-  return rows.slice(-limit);
+export function getRecentMessages(
+  conversationId: string,
+  limit = VERBATIM_WINDOW,
+  excludeIds: string[] = [],
+) {
+  return getActivePath(conversationId)
+    .filter((m) => !excludeIds.includes(m.id))
+    .slice(-limit);
 }
 
 export function getMessagesSince(conversationId: string, count: number) {
-  const rows = db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, conversationId))
-    .all();
-  return rows.slice(-count);
+  return getActivePath(conversationId).slice(-count);
 }
 
 /** 供「世界书命中面板」等 UI 预览用 */

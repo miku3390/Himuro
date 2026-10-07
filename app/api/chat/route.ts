@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { conversations, messages as messagesTable, msgChunks } from "@/lib/db/schema";
+import { conversations, messages as messagesTable } from "@/lib/db/schema";
+import { getActivePath, nextIdx } from "@/lib/branch";
 import {
   getCharacterCard,
   getWorldbookEntriesForCharacter,
@@ -23,8 +24,9 @@ export const maxDuration = 300;
  *
  * 请求：{ conversationId, content, emotion? }
  *      或重Roll：{ conversationId, reroll: true, rerollMessageId? }
- *      （rerollMessageId 是要替换的那条角色回复；不传则对最后一条角色回复重Roll；
- *        末尾是用户消息时直接续写——编辑重发用这个路径）
+ *      （v1.5 分支树：重Roll 不再删除旧回复，新回复作为兄弟分支挂到同一父节点下，
+ *        旧分支保留可切回；rerollMessageId 是要重Roll 的那条回复；不传则对活跃路径
+ *        末尾操作——末尾是用户消息时直接续写，这是编辑重发走的路径）
  *
  * 单聊事件：{t:"hits"} → {t:"tok"}* → {t:"done", messageId, userMessageId, summary}
  * 群聊事件：{t:"speakers", speakers:[…]} → ({t:"speaker"} → {t:"hits"} → {t:"tok"}* →
@@ -67,9 +69,20 @@ export async function POST(req: Request) {
     }
   }
 
-  // 1. 落库：普通发送 → 插入用户消息；重Roll → 删掉被替换的角色回复（含向量块）
+  // 1. 分支树定位 + 落库。
+  //    活跃路径叶子决定挂载点：普通发送 → 用户消息挂在叶子下；
+  //    重Roll → 不再删除旧回复，新回复作为「兄弟分支」挂到被替换消息的父节点下；
+  //    编辑重发（末尾是用户消息）→ 直接续写为该用户消息的子分支。
+  const path = getActivePath(conversationId);
+  const leaf = path.at(-1);
+
   let userMsgId = "__reroll__";
   let rerollSpeakerId: string | null = null;
+  /** 本轮第一条回复的挂载父消息；null = 成为根（空会话/根级重Roll） */
+  let firstReplyParentId: string | null;
+  /** 生成上下文时要剔除的消息（被重Roll 的旧回复本身，避免模型把它当成上文续写） */
+  const contextExcludeIds: string[] = [];
+
   if (isReroll) {
     if (body.rerollMessageId) {
       const target = db
@@ -81,21 +94,15 @@ export async function POST(req: Request) {
         return Response.json({ error: "要重Roll的消息不存在" }, { status: 404 });
       }
       rerollSpeakerId = target.characterId;
-      db.delete(msgChunks).where(eq(msgChunks.messageId, target.id)).run();
-      db.delete(messagesTable).where(eq(messagesTable.id, target.id)).run();
+      contextExcludeIds.push(target.id);
+      firstReplyParentId = target.role === "assistant" ? target.parentId : target.id;
+    } else if (leaf?.role === "assistant") {
+      rerollSpeakerId = leaf.characterId;
+      contextExcludeIds.push(leaf.id);
+      firstReplyParentId = leaf.parentId;
     } else {
-      const last = db
-        .select()
-        .from(messagesTable)
-        .where(eq(messagesTable.conversationId, conversationId))
-        .all()
-        .at(-1);
-      if (last?.role === "assistant") {
-        rerollSpeakerId = last.characterId;
-        db.delete(msgChunks).where(eq(msgChunks.messageId, last.id)).run();
-        db.delete(messagesTable).where(eq(messagesTable.id, last.id)).run();
-      }
-      // 末尾是用户消息（编辑重发后）→ 不删，直接续写
+      // 末尾是用户消息（编辑重发后）→ 续写
+      firstReplyParentId = leaf?.id ?? null;
     }
   } else {
     userMsgId = crypto.randomUUID();
@@ -103,18 +110,22 @@ export async function POST(req: Request) {
       .values({
         id: userMsgId,
         conversationId,
-        idx: db
-          .select({ id: messagesTable.id })
-          .from(messagesTable)
-          .where(eq(messagesTable.conversationId, conversationId))
-          .all().length,
+        idx: nextIdx(conversationId),
         role: "user",
         content,
         characterId: null,
+        parentId: leaf?.id ?? null,
         emotion: body.emotion || null,
         createdAt: Date.now(),
       })
       .run();
+    if (leaf) {
+      db.update(messagesTable)
+        .set({ activeChildId: userMsgId })
+        .where(eq(messagesTable.id, leaf.id))
+        .run();
+    }
+    firstReplyParentId = userMsgId;
   }
   db.update(conversations)
     .set({ updatedAt: Date.now() })
@@ -162,6 +173,8 @@ export async function POST(req: Request) {
     async start(ctrl) {
       controller = ctrl;
       let lastAssistantId = "";
+      // 群聊一轮多个发言者按顺序链式挂接（B 的父是 A），保证「单活跃子指针」路径完整
+      let prevReplyParentId: string | null = firstReplyParentId;
       try {
         if (isGroup) {
           emit({
@@ -196,11 +209,14 @@ export async function POST(req: Request) {
               emotion: body.emotion || null,
               embedMessageId: !isReroll && i === 0 ? userMsgId : null,
               embedMessageContent: content,
+              parentId: prevReplyParentId,
+              contextExcludeIds,
             },
             settings,
             emit,
           );
           lastAssistantId = r.assistantId;
+          prevReplyParentId = r.assistantId;
           if (isGroup) {
             emit({ t: "speaker_done", characterId: sp.card.id, messageId: r.assistantId });
           }

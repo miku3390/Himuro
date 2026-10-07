@@ -1,7 +1,7 @@
 import "server-only";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { messages as messagesTable } from "@/lib/db/schema";
+import { conversations, messages as messagesTable } from "@/lib/db/schema";
 import {
   getRecentMessages,
   KEYWORD_SCAN_WINDOW,
@@ -48,6 +48,10 @@ export type EngineParams = {
   /** 需要向量化的一条用户消息 id（重Roll/群聊非首发言者传 null 跳过） */
   embedMessageId: string | null;
   embedMessageContent: string;
+  /** 分支树：本条回复挂载的父消息 id（用户消息/上一发言者的回复；null = 成为根） */
+  parentId: string | null;
+  /** 生成上下文时从活跃路径剔除的消息 id（重Roll 时 = 被替换的旧回复） */
+  contextExcludeIds?: string[];
 };
 
 export async function generateOneReply(
@@ -55,7 +59,7 @@ export async function generateOneReply(
   settings: AppSettings,
   emit: EmitFn,
 ): Promise<{ assistantId: string; full: string }> {
-  const recent = getRecentMessages(p.conversationId, VERBATIM_WINDOW);
+  const recent = getRecentMessages(p.conversationId, VERBATIM_WINDOW, p.contextExcludeIds ?? []);
 
   const hits = matchWorldbook(
     p.entries,
@@ -126,9 +130,23 @@ export async function generateOneReply(
       role: "assistant",
       content: full,
       characterId: p.isGroup ? p.character.id : null,
+      parentId: p.parentId,
       createdAt: Date.now(),
     })
     .run();
+  // 让父消息的活跃子分支指向自己，新回复立即可见（旧分支保留可切回）；
+  // 没有父消息（成为根，如空会话首条/根级重Roll）则更新会话的活跃根
+  if (p.parentId) {
+    db.update(messagesTable)
+      .set({ activeChildId: assistantId })
+      .where(eq(messagesTable.id, p.parentId))
+      .run();
+  } else {
+    db.update(conversations)
+      .set({ activeRootId: assistantId })
+      .where(eq(conversations.id, p.conversationId))
+      .run();
+  }
 
   try {
     if (p.embedMessageId) {

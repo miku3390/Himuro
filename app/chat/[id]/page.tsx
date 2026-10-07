@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { characters, conversations, convMembers, messages as messagesTable } from "@/lib/db/schema";
+import { getActivePath, getAllMessages, withAltInfo } from "@/lib/branch";
 import ChatRoom from "@/components/ChatRoom";
 import { getCharacterCard } from "@/lib/memory";
 
@@ -42,11 +43,9 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
   const character = getCharacterCard(primaryId);
   if (!character) notFound();
 
-  const rows = db
-    .select()
-    .from(messagesTable)
-    .where(eq(messagesTable.conversationId, id))
-    .all();
+  // 展示的是「活跃路径」：从根沿活跃分支指针走到叶子；死分支保留在库里可切回
+  const allRows = getAllMessages(id);
+  const visibleRows = withAltInfo(getActivePath(id), allRows);
 
   // 「添加成员」下拉的候选 = 全部非模板角色
   const allMine = db
@@ -70,13 +69,15 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
       members={charRows}
       isGroup={isGroup}
       allCharacters={allMine}
-      initialMessages={rows.map((m) => ({
+      initialMessages={visibleRows.map((m) => ({
         id: m.id,
         role: m.role as "user" | "assistant",
         content: m.content,
         characterId: m.characterId,
         emotion: m.emotion,
         starred: m.starred === 1,
+        altIndex: m.altIndex,
+        altCount: m.altCount,
       }))}
     />
   );

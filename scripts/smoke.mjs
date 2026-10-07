@@ -39,14 +39,41 @@ ok(!!reply1?.messageId, "回复落库");
 const count1 = () => db.prepare("SELECT count(*) n FROM messages WHERE conversation_id=?").get(convId).n;
 ok(count1() === 2, `消息数=2（实际 ${count1()}）`);
 
-/* ---------- 2. 重Roll ---------- */
+/* ---------- 2. 重Roll → 兄弟分支 ---------- */
+const userRow = db
+  .prepare("SELECT id FROM messages WHERE conversation_id=? AND role='user' ORDER BY idx")
+  .get(convId);
 const reroll = await chat({ reroll: true, rerollMessageId: reply1.messageId });
 const reply2 = reroll.events.find((e) => e.t === "done");
 ok(reroll.res.status === 200 && !!reply2?.messageId, "重Roll 成功返回新回复");
 ok(reply2.messageId !== reply1.messageId, "重Roll 产生了新消息 id");
-const oldGone = db.prepare("SELECT count(*) n FROM messages WHERE id=?").get(reply1.messageId).n;
-ok(oldGone === 0, "旧回复已被删除");
-ok(count1() === 2, `重Roll 后消息数仍=2（实际 ${count1()}）`);
+const oldKept = db.prepare("SELECT count(*) n FROM messages WHERE id=?").get(reply1.messageId).n;
+ok(oldKept === 1, "旧回复保留（分支树不再删除）");
+ok(count1() === 3, `重Roll 后消息数=3（实际 ${count1()}）`);
+const r1 = db.prepare("SELECT parent_id FROM messages WHERE id=?").get(reply1.messageId);
+const r2 = db.prepare("SELECT parent_id FROM messages WHERE id=?").get(reply2.messageId);
+ok(r1.parent_id === userRow.id, "旧回复挂在用户消息下");
+ok(r2.parent_id === r1.parent_id, "新回复与旧回复是兄弟（同父）");
+const parentActive = db
+  .prepare("SELECT active_child_id FROM messages WHERE id=?")
+  .get(userRow.id).active_child_id;
+ok(parentActive === reply2.messageId, "父消息活跃指针指向新回复");
+
+// 无 target 重Roll：对活跃路径末尾（reply2）重Roll → 第三条兄弟
+const reroll2 = await chat({ reroll: true });
+const reply3 = reroll2.events.find((e) => e.t === "done");
+const r3 = db.prepare("SELECT parent_id FROM messages WHERE id=?").get(reply3.messageId);
+ok(!!reply3?.messageId && reply3.messageId !== reply2.messageId, "无 target 重Roll 也生成新兄弟");
+ok(r3.parent_id === r1.parent_id, "第三条兄弟挂载点正确");
+ok(count1() === 4, `消息数=4（实际 ${count1()}）`);
+
+// DB 级切回第一版分支 → 再重Roll：挂载点应跟随切换后的活跃路径（兄弟语义验证）
+db.prepare("UPDATE messages SET active_child_id=? WHERE id=?").run(reply1.messageId, userRow.id);
+const reroll3 = await chat({ reroll: true });
+const reply4 = reroll3.events.find((e) => e.t === "done");
+const r4 = db.prepare("SELECT parent_id FROM messages WHERE id=?").get(reply4.messageId);
+ok(!!reply4?.messageId && r4.parent_id === r1.parent_id, "切回旧分支后重Roll 挂载点正确");
+ok(count1() === 5, `消息数=5（实际 ${count1()}）`);
 
 /* ---------- 3. SillyTavern PNG 卡导入 ---------- */
 const stCard = {

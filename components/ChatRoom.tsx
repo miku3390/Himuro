@@ -5,10 +5,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   addConversationMember,
-  deleteMessage,
-  editUserMessageAndTruncate,
+  deleteMessageTree,
+  editUserMessageBranch,
   removeConversationMember,
   saveEntryForCharacter,
+  switchAlternative,
   toggleStar,
   updateConversation,
   writeBackExample,
@@ -35,6 +36,9 @@ type Msg = {
   characterId?: string | null;
   emotion: string | null;
   starred: boolean;
+  /** 分支树：兄弟备选组内的位置与总数（服务端算好下发；本地乐观追加时填 1/1） */
+  altIndex?: number;
+  altCount?: number;
 };
 
 type Member = { id: string; name: string; emoji: string; color: string };
@@ -103,6 +107,11 @@ export default function ChatRoom({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs, streaming]);
+
+  // router.refresh() 后服务端会下发新的活跃路径，同步进本地状态
+  useEffect(() => {
+    setMsgs(initialMessages);
+  }, [initialMessages]);
 
   function flash(text: string) {
     setNotice(text);
@@ -238,27 +247,36 @@ export default function ChatRoom({
     setEmotion(null);
   }
 
-  /* ------------------------- 重Roll：重新生成回复 ------------------------- */
+  /* -------------------- 重Roll：生成新的兄弟分支（旧回复保留） -------------------- */
   async function reroll(messageId?: string) {
     if (busy) return;
     const target = messageId ?? lastAssistantId(msgs);
     if (!target) return;
-    setMsgs((m) => m.filter((x) => x.id !== target)); // 乐观移除旧回复
     try {
       const r = await runStream({ reroll: true, rerollMessageId: target });
       if (!r.appendedBySpeaker) {
         setMsgs((m) => [
           ...m,
-          { id: r.messageId, role: "assistant", content: r.text, characterId: null, emotion: null, starred: false },
+          {
+            id: r.messageId,
+            role: "assistant",
+            content: r.text,
+            characterId: null,
+            emotion: null,
+            starred: false,
+            altIndex: 1,
+            altCount: 1,
+          },
         ]);
       }
       if (r.summary) setSummary(r.summary);
+      router.refresh(); // 同步规范的分支序号（旧回复变成 ‹ 1/2 › 可切回）
     } catch (e) {
       flash(e instanceof Error ? e.message : "重Roll失败");
     }
   }
 
-  /* ---------------------- 编辑用户消息 → 截断 → 重生成 ---------------------- */
+  /* ------------------- 编辑用户消息 → 新建兄弟分支 → 续写回复 ------------------- */
   function startEdit(m: Msg) {
     setEditingId(m.id);
     setEditText(m.content);
@@ -269,29 +287,55 @@ export default function ChatRoom({
     const id = editingId;
     setEditingId(null);
     try {
-      await editUserMessageAndTruncate(id, editText);
-      const idx = msgs.findIndex((x) => x.id === id);
-      setMsgs((m) => [
-        ...m.slice(0, idx).map((x) => (x.id === id ? { ...x, content: editText.trim() } : x)),
-        { ...m[idx], content: editText.trim() },
-      ]);
-      const r = await runStream({ reroll: true }); // 末尾是刚编辑的用户消息，服务端按策略续写
-      if (!r.appendedBySpeaker) {
+      const r = await editUserMessageBranch(id, editText);
+      // 本地先行切到新分支：编辑点之后的消息随旧分支离开视野
+      setMsgs((m) => {
+        const idx = m.findIndex((x) => x.id === id);
+        if (idx < 0) return m;
+        return [...m.slice(0, idx), { ...m[idx], id: r.newUserMessageId, content: editText.trim() }];
+      });
+      const s = await runStream({ reroll: true }); // 活跃路径末尾是刚建的用户消息 → 服务端续写
+      if (!s.appendedBySpeaker) {
         setMsgs((m) => [
           ...m,
-          { id: r.messageId, role: "assistant", content: r.text, characterId: null, emotion: null, starred: false },
+          {
+            id: s.messageId,
+            role: "assistant",
+            content: s.text,
+            characterId: null,
+            emotion: null,
+            starred: false,
+            altIndex: 1,
+            altCount: 1,
+          },
         ]);
       }
-      if (r.summary) setSummary(r.summary);
+      if (s.summary) setSummary(s.summary);
+      router.refresh();
     } catch (e) {
       flash(e instanceof Error ? e.message : "编辑失败");
+      router.refresh();
     }
   }
 
   function removeMsg(id: string) {
-    if (!confirm("删除这条消息？（它生成的记忆向量会一并删除）")) return;
-    setMsgs((m) => m.filter((x) => x.id !== id));
-    startTransition(() => deleteMessage(id));
+    if (!confirm("删除这条消息及其所有分支后续？（记忆向量会一并删除）")) return;
+    setMsgs((m) => {
+      const idx = m.findIndex((x) => x.id === id);
+      return idx < 0 ? m : m.slice(0, idx);
+    });
+    startTransition(async () => {
+      await deleteMessageTree(id);
+      router.refresh();
+    });
+  }
+
+  /* ------------------------------ 分支切换 ------------------------------ */
+  function switchBranch(id: string, delta: number) {
+    startTransition(async () => {
+      await switchAlternative(id, delta);
+      router.refresh();
+    });
   }
 
   /* ------------------------------ 会话级切换 ------------------------------ */
@@ -496,6 +540,29 @@ export default function ChatRoom({
                     )}
                     {!isEditing && (
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                        {(m.altCount ?? 1) > 1 && (
+                          <span className="flex items-center gap-1">
+                            <button
+                              className="hover:text-indigo-500 disabled:opacity-40"
+                              disabled={busy || pending}
+                              title="上一个分支"
+                              onClick={() => switchBranch(m.id, -1)}
+                            >
+                              ‹
+                            </button>
+                            <span title="分支备选：重Roll/编辑留下的历史版本，可随时切回">
+                              {m.altIndex ?? 1}/{m.altCount ?? 1}
+                            </span>
+                            <button
+                              className="hover:text-indigo-500 disabled:opacity-40"
+                              disabled={busy || pending}
+                              title="下一个分支"
+                              onClick={() => switchBranch(m.id, 1)}
+                            >
+                              ›
+                            </button>
+                          </span>
+                        )}
                         <button
                           className={m.starred ? "text-amber-500" : "hover:text-amber-500"}
                           title="复盘星标：标出满意的回复"
