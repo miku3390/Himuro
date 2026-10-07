@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   addConversationMember,
   deleteMessage,
@@ -57,6 +58,15 @@ function lastAssistantId(list: Msg[]): string | null {
   return null;
 }
 
+/** 流式过程出错：err 事件可能带回调落库的用户消息真实 id，用于修复本地气泡的临时 id */
+class StreamError extends Error {
+  userMessageId?: string;
+  constructor(message: string, userMessageId?: string) {
+    super(message);
+    this.userMessageId = userMessageId;
+  }
+}
+
 export default function ChatRoom({
   conversation,
   character,
@@ -87,6 +97,7 @@ export default function ChatRoom({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [pending, startTransition] = useTransition();
+  const router = useRouter();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -163,7 +174,7 @@ export default function ChatRoom({
           } else if (evt.t === "done") {
             done = evt;
           } else if (evt.t === "err") {
-            throw new Error(evt.message);
+            throw new StreamError(evt.message, evt.userMessageId);
           }
         }
       }
@@ -193,7 +204,9 @@ export default function ChatRoom({
       const r = await runStream({ content, emotion });
       setMsgs((m) => [
         ...m.map((x) =>
-          x.id === tmpId ? { ...x, id: r.userMessageId ?? `u-${Date.now()}` } : x,
+          // done 一定带真实 userMessageId；万一缺失则保留 tmpId 并靠 refresh 从库同步，
+          // 绝不能伪造永久假 id（否则后续编辑重发会报"消息不存在"）
+          x.id === tmpId ? { ...x, id: r.userMessageId ?? tmpId } : x,
         ),
         ...(r.appendedBySpeaker
           ? []
@@ -209,9 +222,18 @@ export default function ChatRoom({
             ]),
       ]);
       if (r.summary) setSummary(r.summary);
-    } catch (e) {
-      flash(e instanceof Error ? e.message : String(e));
-      setMsgs((m) => m.map((x) => (x.id === tmpId ? { ...x, id: `u-${Date.now()}` } : x)));
+      if (!r.userMessageId) router.refresh();
+    } catch (err) {
+      flash(err instanceof Error ? err.message : String(err));
+      const realId = err instanceof StreamError ? err.userMessageId : undefined;
+      if (realId) {
+        // 流中断但用户消息已落库：回填真实 id，气泡保持可编辑
+        setMsgs((m) => m.map((x) => (x.id === tmpId ? { ...x, id: realId } : x)));
+      } else {
+        // 请求未到达落库阶段（或中断且拿不到 id）：移除气泡并恢复输入，避免留下假 id 气泡
+        setMsgs((m) => m.filter((x) => x.id !== tmpId));
+        setInputVal((v) => v || content);
+      }
     }
     setEmotion(null);
   }

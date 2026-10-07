@@ -227,9 +227,11 @@ export async function POST(req: Request) {
           summary: summaryText,
         });
       } catch (err) {
+        // 用户消息在流开始前已落库：把真实 id 随 err 带回，客户端气泡才能保留可编辑的锚点
         emit({
           t: "err",
           message: err instanceof Error ? err.message : String(err),
+          userMessageId: isReroll ? undefined : userMsgId,
         });
       } finally {
         controller.close();
