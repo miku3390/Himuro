@@ -53,6 +53,7 @@ npm run build && npm start   # 生产模式
 ## 文档（迭代前必读）
 
 - [docs/FEATURE-SPEC.md](docs/FEATURE-SPEC.md) —— 风月功能规格 → Himuro 实现对照表 + Phase 2 路线图
+- [docs/PLAYTEST-2026-10-07.md](docs/PLAYTEST-2026-10-07.md) —— 首次真人试玩的问题记录与改进方案（待实施）
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) —— 数据模型、模块划分、Prompt 组装与记忆层设计
 - [docs/DEV-GUIDE.md](docs/DEV-GUIDE.md) —— 怎么加字段/加页面/换 TTS 供应商等迭代指南
 
