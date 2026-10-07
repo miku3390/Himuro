@@ -228,6 +228,103 @@ if (ttsCfg.tts_provider === "gptsovits" && !gptReachable) {
   db.prepare("DELETE FROM characters WHERE id=?").run(ttsCharId);
 }
 
+/* ---------- 7. ST 卡 PNG 导出闭环 ---------- */
+function readCharaFromPngBytes(buf) {
+  let off = 8;
+  while (off + 12 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString("latin1", off + 4, off + 8);
+    if (type === "tEXt") {
+      const data = buf.subarray(off + 8, off + 8 + len);
+      const nul = data.indexOf(0);
+      if (nul > 0 && data.toString("latin1", 0, nul) === "chara") {
+        return JSON.parse(Buffer.from(data.toString("latin1", nul + 1), "base64").toString("utf8"));
+      }
+    }
+    off += 12 + len;
+  }
+  return null;
+}
+const cardPngRes = await fetch("http://localhost:3000/api/export/card", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ characterId: imp.id }),
+});
+const cardPng = Buffer.from(await cardPngRes.arrayBuffer());
+ok(
+  cardPngRes.ok &&
+    cardPng.readUInt32BE(8) === 13 &&
+    cardPng.toString("latin1", 12, 16) === "IHDR" &&
+    readCharaFromPngBytes(cardPng)?.data?.name === "星霜",
+  "ST 卡 PNG 导出：结构合法且 tEXt chara 可解析",
+);
+ok(readCharaFromPngBytes(cardPng)?.spec === "chara_card_v2", "卡数据为 V2 规格");
+
+const fd2 = new FormData();
+fd2.append("file", new Blob([cardPng], { type: "image/png" }), "reimport.png");
+const imp2Res = await fetch("http://localhost:3000/api/import/card", { method: "POST", body: fd2 });
+const imp2 = await imp2Res.json();
+ok(imp2Res.ok && imp2.name === "星霜", `导出的 PNG 能再导入（roundtrip）`);
+
+/* ---------- 8. 会话导出 → 导入 ---------- */
+const exportRes = await fetch(`http://localhost:3000/api/export?conversationId=${convId}&format=json`);
+const exportJson = await exportRes.json();
+ok(
+  exportRes.ok &&
+    exportJson.format === "himuro-chat" &&
+    exportJson.conversation.characterId === char.id,
+  "会话导出 JSON 含 characterId（无损导入用）",
+);
+const impConvRes = await fetch("http://localhost:3000/api/import/conversation", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(exportJson),
+});
+const impConv = await impConvRes.json();
+ok(impConvRes.ok && impConv.imported === 5, `会话导入成功（${impConv.imported} 条）`);
+const impConvRows = db
+  .prepare("SELECT role FROM messages WHERE conversation_id=? ORDER BY idx")
+  .all(impConv.id);
+ok(impConvRows.length === 5 && impConvRows[0].role === "user", "导入消息线性成链且条数一致");
+
+// 清理导入的会话与二次导入的角色
+db.prepare("DELETE FROM messages WHERE conversation_id=?").run(impConv.id);
+db.prepare("DELETE FROM conversations WHERE id=?").run(impConv.id);
+if (imp2.id) {
+  const imp2Wb = db.prepare("SELECT id FROM worldbooks WHERE character_id=?").get(imp2.id);
+  if (imp2Wb) {
+    db.prepare("DELETE FROM wb_entries WHERE worldbook_id=?").run(imp2Wb.id);
+    db.prepare("DELETE FROM worldbooks WHERE id=?").run(imp2Wb.id);
+  }
+  db.prepare("DELETE FROM characters WHERE id=?").run(imp2.id);
+}
+
+/* ---------- 9. 全库备份 → 恢复 ---------- */
+const backupRes = await fetch("http://localhost:3000/api/backup");
+const backup = await backupRes.json();
+ok(
+  backupRes.ok &&
+    backup.format === "himuro-backup" &&
+    Array.isArray(backup.tables.characters) &&
+    backup.tables.characters.length > 0,
+  `全库备份导出（${backup.tables?.characters?.length ?? 0} 个角色）`,
+);
+// 备份之后塞进来的东西，恢复后应消失
+const tmpCharId = crypto.randomUUID();
+db.prepare(
+  "INSERT INTO characters (id, name, identity, is_template, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+).run(tmpCharId, "备份恢复测试临时角色", "", 0, now, now);
+const restoreRes = await fetch("http://localhost:3000/api/backup", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(backup),
+});
+const restore = await restoreRes.json();
+ok(restoreRes.ok && restore.ok, "全库恢复成功");
+const tmpGone = db.prepare("SELECT count(*) n FROM characters WHERE id=?").get(tmpCharId).n;
+ok(tmpGone === 0, "恢复把备份之后的改动回滚了");
+ok(db.prepare("SELECT count(*) n FROM characters WHERE name='小满'").get().n === 1, "原有数据完好");
+
 /* ---------- 清理 ---------- */
 db.prepare("DELETE FROM messages WHERE conversation_id=?").run(convId);
 db.prepare("DELETE FROM conversations WHERE id=?").run(convId);

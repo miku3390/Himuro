@@ -147,3 +147,57 @@ export function normalizeCard(json: unknown): NormalizedCard {
     examples: parseMesExample(clip(d.mes_example), name),
   };
 }
+
+/** Himuro 卡 → SillyTavern V2 卡（PNG 导出用；values/boundaries 等无 ST 对应字段，放 extensions） */
+export function toSillyTavernV2(card: {
+  name: string;
+  identity: string;
+  speechStyle: string;
+  values: string;
+  boundaries: string;
+  userAddressing: string;
+  relationship: string;
+  firstMessage: string;
+  examples: Example[];
+}) {
+  const extras = [
+    card.values && `价值观：${card.values}`,
+    card.boundaries && `禁忌边界：${card.boundaries}`,
+    card.userAddressing && `称呼习惯：${card.userAddressing}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return {
+    spec: "chara_card_v2",
+    spec_version: "2.0",
+    data: {
+      name: card.name,
+      description: card.identity,
+      personality: card.speechStyle,
+      scenario: card.relationship,
+      first_mes: card.firstMessage,
+      mes_example: card.examples
+        .map((e) => `<START>\n{{user}}: ${e.user}\n{{char}}: ${e.assistant}`)
+        .join("\n"),
+      creator_notes: [
+        "由 Himuro（冰室）导出的 SillyTavern V2 卡。",
+        extras && `补充设定：\n${extras}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      system_prompt: "",
+      post_history_instructions: "",
+      alternate_greetings: [],
+      tags: [],
+      creator: "Himuro",
+      character_version: "1",
+      extensions: {
+        himuro: {
+          values: card.values,
+          boundaries: card.boundaries,
+          userAddressing: card.userAddressing,
+        },
+      },
+    },
+  };
+}

@@ -69,6 +69,7 @@ export async function GET(req: Request) {
           tier: conv.tier,
           chapter: conv.chapter,
           summary: conv.summaryText,
+          characterId: conv.characterId,
         },
         character: card
           ? {
@@ -85,6 +86,7 @@ export async function GET(req: Request) {
         messages: rows.map((m) => ({
           role: m.role,
           speaker: m.role === "assistant" ? (m.characterId ? (nameById[m.characterId] ?? null) : (card?.name ?? null)) : null,
+          speakerCharacterId: m.characterId ?? null,
           content: m.content,
           emotion: m.emotion,
           starred: m.starred === 1,

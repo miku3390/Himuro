@@ -46,6 +46,7 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
   const [ttsError, setTtsError] = useState("");
   const [ttsHint, setTtsHint] = useState("");
   const [cacheInfo, setCacheInfo] = useState<{ files: number; bytes: number } | null>(null);
+  const [restoreMsg, setRestoreMsg] = useState("");
 
   useEffect(() => {
     ttsCacheInfoAction().then(setCacheInfo).catch(() => setCacheInfo({ files: 0, bytes: 0 }));
@@ -86,6 +87,27 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
       setTestResult((t) => ({ ...t, [key]: { ok: false, reply: "测试中…" } }));
       const r = await testModelConfig(key);
       setTestResult((t) => ({ ...t, [key]: r }));
+    });
+  }
+
+  function restoreBackup(file: File) {
+    if (!confirm("恢复会覆盖现有全部数据（角色/世界书/会话/消息/设置），确定继续？")) return;
+    startTransition(async () => {
+      try {
+        const json = JSON.parse(await file.text());
+        const res = await fetch("/api/backup", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(json),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        setRestoreMsg(
+          "已恢复：" + Object.entries(data.counts as Record<string, number>).map(([k, v]) => `${k} ${v} 条`).join("，"),
+        );
+      } catch (e) {
+        setRestoreMsg(e instanceof Error ? e.message : "恢复失败");
+      }
     });
   }
 
@@ -368,6 +390,32 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           >
             清空语音缓存
           </button>
+        </div>
+      </section>
+
+      <section className={card + " p-5"}>
+        <h2 className="mb-1 font-semibold">数据管理</h2>
+        <p className="mb-3 text-xs text-zinc-400">
+          全库备份 = 9 张表全量 JSON（角色 / 世界书 / 会话 / 消息 / 向量 / 设置…）；恢复会覆盖现有全部数据，操作前请先导出一份。
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <a className={btnGhost + " text-xs"} href="/api/backup">
+            导出全库备份
+          </a>
+          <label className={btnGhost + " cursor-pointer text-xs"}>
+            恢复备份
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) restoreBackup(f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          {restoreMsg && <span className="text-xs text-zinc-500">{restoreMsg}</span>}
         </div>
       </section>
     </div>

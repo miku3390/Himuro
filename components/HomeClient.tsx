@@ -62,13 +62,45 @@ export default function HomeClient({
     });
   }
 
+  function importConversation(file: File) {
+    setError("");
+    startTransition(async () => {
+      try {
+        const json = JSON.parse(await file.text());
+        const res = await fetch("/api/import/conversation", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(json),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        router.push(`/chat/${data.id}`);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "导入失败");
+      }
+    });
+  }
+
   return (
     <div className="flex flex-col gap-6">
       {/* 新建会话 */}
       <section className={card + " p-5"}>
         <div className="mb-4 flex items-center">
           <h2 className="text-base font-semibold">开一场新对话</h2>
-          <div className="ml-auto flex gap-1 text-xs">
+          <div className="ml-auto flex items-center gap-1 text-xs">
+            <label className={btnGhost + " cursor-pointer text-xs"} title="导入 Himuro 会话导出的 JSON 文件">
+              导入会话
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) importConversation(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
             <button
               className={
                 "rounded-lg px-3 py-1.5 transition " +

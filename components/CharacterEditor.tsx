@@ -80,6 +80,32 @@ export default function CharacterEditor({
     URL.revokeObjectURL(a.href);
   }
 
+  /** 可选底图（PNG dataURL）；不选则服务端用角色色渐变底图 */
+  const [baseImage, setBaseImage] = useState<string | null>(null);
+
+  async function exportPng() {
+    setError("");
+    try {
+      const res = await fetch("/api/export/card", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ characterId: form.id, baseImage: baseImage ?? undefined }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(err.error ?? "导出失败");
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${form.name || "card"}-SillyTavern卡.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   const setExample = (i: number, key: keyof Example, v: string) =>
     setForm((f) => ({
       ...f,
@@ -100,6 +126,28 @@ export default function CharacterEditor({
             <button className={btnGhost} onClick={exportJson}>
               导出角色卡
             </button>
+          )}
+          {!isNew && (
+            <button className={btnGhost} onClick={exportPng} title="SillyTavern 通用格式：卡 JSON 写进 PNG 的 tEXt 块">
+              导出 ST 卡 PNG
+            </button>
+          )}
+          {!isNew && (
+            <label className={btnGhost + " cursor-pointer"} title="可选：指定一张 PNG 作为卡面底图">
+              底图{baseImage ? " ✓" : ""}
+              <input
+                type="file"
+                accept="image/png"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return setBaseImage(null);
+                  const reader = new FileReader();
+                  reader.onload = () => setBaseImage(reader.result as string);
+                  reader.readAsDataURL(file);
+                }}
+              />
+            </label>
           )}
           <button className={btnPrimary} disabled={pending} onClick={save}>
             {pending ? "保存中…" : saved ? "✓ 已保存" : "保存"}
