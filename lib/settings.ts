@@ -15,6 +15,11 @@ export type AppSettings = {
   summaryEveryTurns: number;
   wbMaxHits: number;
   vecTopK: number;
+  /** 聊天采样参数（分档；topP = 1 视为未配置，不发送） */
+  lightTemp: number;
+  lightTopP: number;
+  qualityTemp: number;
+  qualityTopP: number;
   ttsVoice: string;
   ttsRate: number;
   ttsPitch: number;
@@ -52,6 +57,10 @@ export function getSettings(): AppSettings {
     summaryEveryTurns: row.summaryEveryTurns,
     wbMaxHits: row.wbMaxHits,
     vecTopK: row.vecTopK,
+    lightTemp: row.lightTemp,
+    lightTopP: row.lightTopP,
+    qualityTemp: row.qualityTemp,
+    qualityTopP: row.qualityTopP,
     ttsVoice: row.ttsVoice,
     ttsRate: row.ttsRate,
     ttsPitch: row.ttsPitch,
@@ -86,6 +95,10 @@ export function saveSettings(patch: Partial<AppSettings>) {
       summaryEveryTurns: patch.summaryEveryTurns,
       wbMaxHits: patch.wbMaxHits,
       vecTopK: patch.vecTopK,
+      lightTemp: patch.lightTemp ?? undefined,
+      lightTopP: patch.lightTopP ?? undefined,
+      qualityTemp: patch.qualityTemp ?? undefined,
+      qualityTopP: patch.qualityTopP ?? undefined,
       ttsVoice: patch.ttsVoice,
       ttsRate: patch.ttsRate,
       ttsPitch: patch.ttsPitch,
@@ -106,4 +119,11 @@ export function saveSettings(patch: Partial<AppSettings>) {
 /** 某一档的模型配置；baseUrl 为 "mock" 时走内置演示模型 */
 export function modelFor(s: AppSettings, tier: Tier): ModelConfig {
   return s[tier];
+}
+
+/** 某一档的采样参数（topP 1 = 未配置，不发送该字段） */
+export function samplingFor(s: AppSettings, tier: Tier): { temperature: number; topP?: number } {
+  const temperature = tier === "light" ? s.lightTemp : s.qualityTemp;
+  const topP = tier === "light" ? s.lightTopP : s.qualityTopP;
+  return { temperature, topP: topP === 1 ? undefined : topP };
 }

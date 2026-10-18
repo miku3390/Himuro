@@ -2,12 +2,16 @@ import "server-only";
 import { sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { characters, settings, wbEntries, worldbooks } from "./schema";
+import kurisuPersona from "@/lib/personas/kurisu.json";
 
 type DB = BetterSQLite3Database<typeof import("./schema")>;
 
 /**
- * 种子数据：设置单行 + 3 个模板角色（对应风月「模板角色中心」的定位）。
+ * 种子数据：设置单行 + 模板角色（对应风月「模板角色中心」的定位）。
  * 模板角色只用于：直接开聊体验节奏 / 复制成自己的角色再改。
+ * 红莉栖从 lib/personas/kurisu.json 读入：五件套骨干 + personaInject 人格原文 +
+ * 关键词触发的行为细则（世界书）——长篇提示词注入（酒馆/风月式）的样板卡，
+ * 评测脚本 scripts/eval-quality.mjs 也以该文件为同一数据源。
  */
 
 type Example = { user: string; assistant: string };
@@ -24,6 +28,8 @@ type SeedCharacter = {
   relationship: string;
   firstMessage: string;
   examples: Example[];
+  /** 自由人格注入（长篇原文，整段拼进 system prompt） */
+  personaInject?: string;
   worldbook: {
     name: string;
     entries: {
@@ -34,6 +40,22 @@ type SeedCharacter = {
       weight: number;
     }[];
   };
+};
+
+const KURISU = kurisuPersona as unknown as {
+  name: string;
+  emoji: string;
+  color: string;
+  identity: string;
+  speechStyle: string;
+  values: string;
+  boundaries: string;
+  userAddressing: string;
+  relationship: string;
+  firstMessage: string;
+  personaInject: string;
+  examples: Example[];
+  worldbook: SeedCharacter["worldbook"];
 };
 
 const TEMPLATES: SeedCharacter[] = [
@@ -248,6 +270,25 @@ const TEMPLATES: SeedCharacter[] = [
   },
 ];
 
+// 经典三卡之后追加人格注入样板卡（数据源 lib/personas/kurisu.json，与评测脚本共用）
+TEMPLATES.push(
+  {
+    name: KURISU.name,
+    emoji: KURISU.emoji,
+    color: KURISU.color,
+    identity: KURISU.identity,
+    speechStyle: KURISU.speechStyle,
+    values: KURISU.values,
+    boundaries: KURISU.boundaries,
+    userAddressing: KURISU.userAddressing,
+    relationship: KURISU.relationship,
+    firstMessage: KURISU.firstMessage,
+    examples: KURISU.examples,
+    personaInject: KURISU.personaInject,
+    worldbook: KURISU.worldbook,
+  },
+);
+
 export function seedIfEmpty(db: DB) {
   const now = Date.now();
 
@@ -291,6 +332,7 @@ export function seedIfEmpty(db: DB) {
         relationship: t.relationship,
         firstMessage: t.firstMessage,
         examplesJson: JSON.stringify(t.examples),
+        personaInject: t.personaInject ?? "",
         isTemplate: 1,
         createdAt: now,
         updatedAt: now,

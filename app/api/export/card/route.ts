@@ -40,6 +40,8 @@ export async function POST(req: Request) {
     relationship: card.relationship,
     firstMessage: card.firstMessage,
     examples: card.examples,
+    personaInject: card.personaInject,
+    authorNote: card.authorNote,
   });
   const png = injectTextChunk(
     base,

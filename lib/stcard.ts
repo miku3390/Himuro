@@ -20,6 +20,9 @@ export type NormalizedCard = {
   relationship: string;
   firstMessage: string;
   examples: Example[];
+  personaInject?: string;
+  authorNote?: string;
+  authorNoteDepth?: number;
 };
 
 /** 从 PNG 二进制里提取角色卡 JSON 文本；非 PNG 或没有卡数据返回 null */
@@ -119,6 +122,9 @@ export function normalizeCard(json: unknown): NormalizedCard {
       relationship: clip(c.relationship),
       firstMessage: clip(c.firstMessage),
       examples: Array.isArray(c.examples) ? (c.examples as Example[]).slice(0, 5) : [],
+      personaInject: clip(c.personaInject, MAX_FIELD * 2),
+      authorNote: clip(c.authorNote),
+      authorNoteDepth: typeof c.authorNoteDepth === "number" ? c.authorNoteDepth : 0,
     };
   }
 
@@ -145,6 +151,10 @@ export function normalizeCard(json: unknown): NormalizedCard {
     relationship: replaceMacros(clip(d.scenario), name),
     firstMessage: replaceMacros(firstMes, name),
     examples: parseMesExample(clip(d.mes_example), name),
+    // ST 双向：system_prompt = 人格注入；post_history_instructions = 作者注释（Himuro 里按注入槽落地）
+    personaInject: replaceMacros(clip(d.system_prompt), name),
+    authorNote: replaceMacros(clip(d.post_history_instructions), name),
+    authorNoteDepth: 0,
   };
 }
 
@@ -159,6 +169,8 @@ export function toSillyTavernV2(card: {
   relationship: string;
   firstMessage: string;
   examples: Example[];
+  personaInject?: string;
+  authorNote?: string;
 }) {
   const extras = [
     card.values && `价值观：${card.values}`,
@@ -185,8 +197,8 @@ export function toSillyTavernV2(card: {
       ]
         .filter(Boolean)
         .join("\n\n"),
-      system_prompt: "",
-      post_history_instructions: "",
+      system_prompt: card.personaInject || "",
+      post_history_instructions: card.authorNote || "",
       alternate_greetings: [],
       tags: [],
       creator: "Himuro",

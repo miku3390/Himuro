@@ -22,6 +22,8 @@ export type StreamOptions = {
   messages: ChatMessage[];
   mockHint?: MockHint;
   temperature?: number;
+  /** 采样 top_p；undefined = 不发送（尊重端点默认） */
+  topP?: number;
 };
 
 const TIMEOUT_MS = 120_000;
@@ -138,6 +140,7 @@ export async function* streamChat(opts: StreamOptions): AsyncGenerator<string> {
     messages,
     stream: true,
     temperature: opts.temperature ?? 0.8,
+    ...(opts.topP !== undefined ? { top_p: opts.topP } : {}),
   });
 
   const reader = res.body!.getReader();

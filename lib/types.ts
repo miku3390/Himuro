@@ -45,6 +45,12 @@ export type CharacterCard = {
   firstMessage: string;
   examples: Example[];
   isTemplate: boolean;
+  /** 自由人格注入（酒馆「系统备注」对等）：整段原文拼进 system prompt 的角色块之后 */
+  personaInject: string;
+  /** 作者注释（Author's Note 对等）：随每轮注入的强提示 */
+  authorNote: string;
+  /** 注释深度：0 = 附在 system prompt 末尾；1..N = 插进对话倒数第 N 条之前 */
+  authorNoteDepth: number;
   /** 角色级 TTS（自部署供应商）：留空回退到设置页全局配置 */
   ttsRefAudio: string;
   ttsPromptText: string;
@@ -71,6 +77,32 @@ export type ModelConfig = {
   apiKey: string;
   model: string;
 };
+
+/** 正则后处理规则（酒馆 Regex 对等） */
+export type RegexTarget = "input" | "output";
+
+export type RegexRule = {
+  id: string;
+  name: string;
+  findRegex: string;
+  replacement: string;
+  flags: string;
+  target: RegexTarget;
+  enabled: boolean;
+  sort: number;
+};
+
+/** 正则编译预检：写错的 findRegex 返回 null，由调用方决定如何提示 */
+export function compileRegex(rule: {
+  findRegex: string;
+  flags: string;
+}): RegExp | null {
+  try {
+    return new RegExp(rule.findRegex, rule.flags);
+  } catch {
+    return null;
+  }
+}
 
 /** 角色卡 JSON 导入导出格式（Himuro 卡，v1） */
 export type HimuroCardFile = {

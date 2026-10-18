@@ -6,6 +6,7 @@ import {
   conversations,
   messages as messagesTable,
   msgChunks,
+  regexRules,
   wbEntries,
   worldbooks,
 } from "@/lib/db/schema";
@@ -13,7 +14,13 @@ import { getActivePath } from "@/lib/branch";
 import { chatComplete, cosineSim, embedTexts } from "@/lib/llm";
 import { buildSummaryMessages } from "@/lib/prompt";
 import { getSettings, modelFor } from "@/lib/settings";
-import { parseExamples, type CharacterCard, type WbEntry } from "@/lib/types";
+import {
+  parseExamples,
+  type CharacterCard,
+  type RegexRule,
+  type RegexTarget,
+  type WbEntry,
+} from "@/lib/types";
 
 /**
  * 三层长会话记忆（对应报告建议，不做过头）：
@@ -72,6 +79,9 @@ export function cardFromRow(row: typeof characters.$inferSelect): CharacterCard 
     ttsPromptLang: row.ttsPromptLang,
     ttsLang: row.ttsLang,
     ttsRate: row.ttsRate,
+    personaInject: row.personaInject,
+    authorNote: row.authorNote,
+    authorNoteDepth: row.authorNoteDepth,
   };
 }
 
@@ -119,6 +129,26 @@ function safeParseArray(json: string): string[] {
   } catch {
     return [];
   }
+}
+
+/* ------------------------------ 正则后处理规则 ------------------------------ */
+
+/** 启用中的规则，按 sort 升序（顺序就是应用顺序） */
+export function enabledRegexRules(target?: RegexTarget): RegexRule[] {
+  const rows = db.select().from(regexRules).all();
+  return rows
+    .filter((r) => r.enabled === 1 && (!target || r.target === target))
+    .sort((a, b) => a.sort - b.sort)
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      findRegex: r.findRegex,
+      replacement: r.replacement,
+      flags: r.flags,
+      target: r.target as RegexTarget,
+      enabled: r.enabled === 1,
+      sort: r.sort,
+    }));
 }
 
 /* ------------------------------ 滚动摘要层 ------------------------------ */

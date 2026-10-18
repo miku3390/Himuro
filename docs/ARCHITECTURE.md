@@ -21,6 +21,8 @@ Next.js 16 单进程（App Router）
       ├── db/index.ts              SQLite 单例 + 启动时自动迁移 + 种子
       ├── db/seed.ts               设置行 + 3 个模板角色
       ├── prompt.ts                Prompt 组装（纯函数，可单测）
+      ├── chatEngine.ts            群聊/单聊共用的生成核心 + 正则输出后处理
+      ├── regex.ts                 正则规则编译与应用（用户输入/模型输出两侧）
       ├── memory.ts                三层记忆引擎 + 世界书命中
       ├── llm.ts                   OpenAI 兼容客户端（流式/补全/Embedding）+ mock 演示模型
       ├── stcard.ts                SillyTavern 卡解析（PNG tEXt chunk / V1V2V3 归一化 / 宏替换）
@@ -34,14 +36,15 @@ Next.js 16 单进程（App Router）
 
 ## 数据模型（SQLite，`data/himuro.db`）
 
-- `characters` —— 角色卡：五件套字段 + relationship + firstMessage + examplesJson(JSON) + isTemplate
+- `characters` —— 角色卡：五件套字段 + relationship + firstMessage + examplesJson(JSON) + personaInject(人格注入细则) + authorNote/authorNoteDepth(Author's Note) + isTemplate
+- `regex_rules` —— 正则后处理规则：findRegex/replacement/flags/target(0输入|1输出|2两者)/enabled/sort（设置页管理，聊天流水线两侧应用）
 - `worldbooks` —— 每角色一本（characterId 关联）
 - `wb_entries` —— 条目：category/title/content/keywordsJson/weight/sort/enabled
 - `wb_versions` —— 整本快照（snapshotJson），变更前自动存，保留 30 份
 - `conversations` —— mode(daily|story) / tier(light|quality) / chapter / summaryText / summarizedCount
 - `messages` —— role/content/emotion(情绪目标)/starred(复盘星标)，idx 为会话内序号
 - `msg_chunks` —— 向量块：messageId/chunk/vectorJson（JSON 数组存 float 向量）
-- `settings` —— 单行表 id=1：三组模型配置 + 记忆参数 + TTS 参数
+- `settings` —— 单行表 id=1：三组模型配置 + 每档采样参数(lightTemp/lightTopP/qualityTemp/qualityTopP，topP=1 不发送) + 记忆参数 + TTS 参数
 
 ## 聊天一轮的完整流水线（app/api/chat/route.ts）
 
@@ -55,14 +58,18 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（重新生成被�
  3. 取最近 12 条原文（VERBATIM_WINDOW；重Roll 时排除待替换的那条旧回复）
  4. matchWorldbook：最近 8 条做关键词扫描 → 权重 top6 条目
  5. searchVectorMemories：用户消息 Embedding → 余弦 top4（未配置则跳过）
- 6. buildSystemPrompt：角色卡五件套 + 示例对话 + 滚动摘要 + 世界书命中 + 向量回忆 + 模式指令 + 情绪目标
- 7. streamChat：OpenAI 兼容 /chat/completions stream=true，逐 token SSE 下发
-    └─ baseUrl === "mock" → 内置演示模型（离线）
- 8. 完成后：assistant 消息入库 → 双条向量入库 → 重Roll 才在这里删掉被替换的旧回复（含向量块）并重排 idx
-    → maybeUpdateSummary（该摘要则摘要）
- 9. SSE 事件：{t:"user_msg", id} → {t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"done", messageId, userMessageId}
+ 6. buildSystemPrompt：角色卡五件套 + 人格注入细则 + 示例对话(few-shot 消息) + 滚动摘要 + 世界书命中 + 向量回忆 + 模式指令 + 情绪目标
+     └─ Author's Note depth 0 时并入 system 末尾（`# 作者注释（每轮提醒）`）
+  7. streamChat：OpenAI 兼容 /chat/completions stream=true，逐 token SSE 下发
+     └─ baseUrl === "mock" → 内置演示模型（离线）；temperature/top_p 来自本档采样设置
+  8. 输出正则改写：模型输出完成后跑 target=输出 的规则（lib/regex.ts），文本有变化则补发 {t:"refine"} 事件，
+     前端用改写后的文本替换正在播放的气泡；入库的是改写后文本
+  9. 完成后：assistant 消息入库 → 双条向量入库 → 重Roll 才在这里删掉被替换的旧回复（含向量块）并重排 idx
+     → maybeUpdateSummary（该摘要则摘要）
+ 10. SSE 事件：{t:"user_msg", id} → {t:"hits"} 命中面板 → {t:"tok"} 增量 → {t:"refine"}? → {t:"done", messageId, userMessageId}
     └─ user_msg 开流就发：用户消息那一刻已经落库，前端拿真 id 替换乐观插入的临时 id；
        流中断时 done 不会来，这条事件是「编辑/删除/星标」还能对上服务端行的唯一依据
+    └─ 用户消息同样先过 target=输入 的正则（发送与入库都用改写后的文本，事件带 processed=true 标记）
     └─ 出错：{t:"err", message}；此时用户消息仍保留，回复没有落库（重Roll 的旧回复也没被删）
 ```
 
@@ -125,14 +132,28 @@ POST {conversationId, reroll:true, rerollMessageId?} 重Roll（重新生成被�
 
 ```
 # 你的角色（五件套 + 关系）
-# 对话示例（few-shot，3-5 组）
+# 角色人格细则（personaInject，可选，紧跟五件套）
+# 对话示例（few-shot，3–5 组；示例作为 user/assistant 消息插在 system 之后，角色带头像更易学）
+# 作者注释（每轮提醒）（Author's Note，depth=0 时并入 system 末尾；depth≥N 时插入最近第 N+1 条消息前）
 # 此前发生的事（滚动摘要）
 # 世界书设定（本轮命中条目，【分类·标题】内容）
 # 更早对话中的相关回忆（向量检索）
 # 模式：日常聊天 | 连载剧情（章末【下一章钩子】要求）
 # 本轮情绪目标
-# 输出要求（保持入戏）
+# 输出要求（保持入戏 + 反复读收尾约束）
 ```
+
+## 质量评测（scripts/eval-quality.mjs，`npm run eval`）
+
+对出厂样板卡「红莉栖」跑多场景连环对话，机器可验的硬指标：
+
+- 立场类：无 AI 残留措辞、无你/您称呼、无 emoji、感叹号 ≤2
+- 节奏类：存在 30 字以上铺陈句、存在动作描写（括号式或叙事式）
+- 内容类：场景弱关键词出现、世界书条目应命尽命（对照 hits 事件）
+- 一致性类：同一条消息重Roll 5 次收尾互不相同、长度离散度 ≥30（防等长复读）、重复发送同句给出递进反应
+
+报告写入 `data/eval/eval-<时间戳>-t<档>.json`（全量回复文本+逐项判定，gitignore）。用法：
+`npm run eval -- --tier quality`（默认 light）；`--rounds N` 跑多轮；`--repeat-check` 附加复读检测（耗 API）。
 
 ## 设计原则
 

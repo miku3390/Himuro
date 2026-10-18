@@ -9,6 +9,7 @@ import {
   conversations,
   convMembers,
   messages as messagesTable,
+  regexRules,
   wbEntries,
   wbVersions,
   worldbooks,
@@ -28,6 +29,8 @@ import {
   type Example,
   type GroupStrategy,
   type Mode,
+  type RegexRule,
+  type RegexTarget,
   type Tier,
   type WbCategory,
 } from "@/lib/types";
@@ -66,6 +69,9 @@ function upsertCharacterValues(input: CharacterInput) {
     ttsLang: input.ttsLang ?? "",
     // 0 = 未配置（回退全局）；顺手把越界值夹到实测有效区间
     ttsRate: clampTtsRate(input.ttsRate ?? 0, true),
+    personaInject: input.personaInject ?? "",
+    authorNote: input.authorNote ?? "",
+    authorNoteDepth: Math.max(0, Math.min(12, Math.floor(input.authorNoteDepth ?? 0))),
   };
 }
 
@@ -618,6 +624,82 @@ export async function writeBackExample(messageId: string) {
 
 export async function saveSettingsAction(patch: Parameters<typeof saveSettings>[0]) {
   saveSettings(patch);
+  revalidatePath("/settings");
+}
+
+/* =========================== 正则后处理（酒馆式） =========================== */
+
+export type RegexRuleInput = {
+  id?: string;
+  name: string;
+  findRegex: string;
+  replacement: string;
+  flags: string;
+  target: RegexTarget;
+  enabled: boolean;
+  sort: number;
+};
+
+/** 列出全部规则（含禁用项），设置页展示用 */
+export async function listRegexRules(): Promise<RegexRule[]> {
+  const rows = db.select().from(regexRules).all();
+  return rows
+    .sort((a, b) => a.sort - b.sort)
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      findRegex: r.findRegex,
+      replacement: r.replacement,
+      flags: r.flags,
+      target: r.target as RegexTarget,
+      enabled: r.enabled === 1,
+      sort: r.sort,
+    }));
+}
+
+/** 保存（新增或覆盖）：写库前预检正则合法性，非法直接抛错给 UI */
+export async function saveRegexRule(input: RegexRuleInput): Promise<{ id: string }> {
+  if (!input.findRegex.trim()) throw new Error("findRegex 不能为空");
+  try {
+    new RegExp(input.findRegex, input.flags);
+  } catch (e) {
+    throw new Error(`正则无效：${e instanceof Error ? e.message : "格式错误"}`);
+  }
+  const id = input.id || uid();
+  const nowTs = now();
+  db.insert(regexRules)
+    .values({
+      id,
+      name: input.name.trim() || "未命名规则",
+      findRegex: input.findRegex,
+      replacement: input.replacement,
+      flags: input.flags || "g",
+      target: input.target === "input" ? "input" : "output",
+      enabled: input.enabled ? 1 : 0,
+      sort: input.sort,
+      createdAt: nowTs,
+      updatedAt: nowTs,
+    })
+    .onConflictDoUpdate({
+      target: regexRules.id,
+      set: {
+        name: input.name.trim() || "未命名规则",
+        findRegex: input.findRegex,
+        replacement: input.replacement,
+        flags: input.flags || "g",
+        target: input.target === "input" ? "input" : "output",
+        enabled: input.enabled ? 1 : 0,
+        sort: input.sort,
+        updatedAt: nowTs,
+      },
+    })
+    .run();
+  revalidatePath("/settings");
+  return { id };
+}
+
+export async function deleteRegexRule(id: string) {
+  db.delete(regexRules).where(eq(regexRules.id, id)).run();
   revalidatePath("/settings");
 }
 

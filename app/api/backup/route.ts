@@ -5,6 +5,7 @@ import {
   convMembers,
   messages as messagesTable,
   msgChunks,
+  regexRules,
   settings as settingsTable,
   wbEntries,
   wbVersions,
@@ -29,6 +30,7 @@ const TABLES = {
   convMembers,
   messages: messagesTable,
   msgChunks,
+  regexRules,
   settings: settingsTable,
 } as const;
 
@@ -66,7 +68,7 @@ export async function POST(req: Request) {
   try {
     db.transaction((tx) => {
       // 子表在前逐张清空
-      for (const name of ["msgChunks", "messages", "convMembers", "conversations", "wbVersions", "wbEntries", "worldbooks", "characters", "settings"] as TableName[]) {
+      for (const name of ["msgChunks", "messages", "convMembers", "conversations", "wbVersions", "wbEntries", "worldbooks", "regexRules", "characters", "settings"] as TableName[]) {
         tx.delete(TABLES[name]).run();
       }
       // 回插顺序无强约束（未开外键），按原顺序即可

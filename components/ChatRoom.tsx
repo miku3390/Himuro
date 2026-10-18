@@ -60,6 +60,9 @@ type Conv = {
   chapter: number;
   summary: string;
   groupStrategy: GroupStrategy | null;
+  /** 两档是否各自挂着演示模型（mock）：顶栏提示不踩坑；切档时按当前档位取值 */
+  lightMock?: boolean;
+  qualityMock?: boolean;
 };
 
 type Hit = { category: string; title: string; weight: number };
@@ -154,6 +157,8 @@ export default function ChatRoom({
   const [ttsProgress, setTtsProgress] = useState<string | null>(null);
 
   useEffect(() => {
+    // localStorage 只在客户端可读：从 effect 里同步给 state（SSR 首帧取不到是预期行为）
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setTtsProvider(currentProvider());
   }, []);
 
@@ -163,6 +168,7 @@ export default function ChatRoom({
 
   // router.refresh() 后服务端会下发新的活跃路径，同步进本地状态
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMsgs(initialMessages);
   }, [initialMessages]);
 
@@ -184,6 +190,8 @@ export default function ChatRoom({
     summary?: string;
     appendedBySpeaker: boolean;
     error?: string;
+    /** 服务端经过输入正则改写后的用户消息最终文本（无改写时 undefined） */
+    processedUserText?: string;
   };
 
   async function runStream(
@@ -195,6 +203,7 @@ export default function ChatRoom({
     let acc = "";
     let speakerAcc = "";
     let userMessageId: string | undefined;
+    let processedUserText: string | undefined;
     let streamError: string | undefined;
     let done: { messageId: string; userMessageId?: string; summary?: string } | null = null;
     try {
@@ -228,6 +237,15 @@ export default function ChatRoom({
           const evt = JSON.parse(line.slice(5).trim());
           if (evt.t === "user_msg") {
             userMessageId = evt.id;
+            // 服务端做过输入正则改写：把原始文本换成入库后的最终文本（稍后统一交给气泡）
+            if (evt.processed && evt.processed !== payload.content) {
+              processedUserText = evt.processed;
+            }
+          } else if (evt.t === "refine") {
+            // 输出正则改写后的最终文本：替换流式气泡（落库文本以服务端为准）
+            acc = evt.v;
+            speakerAcc = evt.v;
+            setStreaming(speakerAcc);
           } else if (evt.t === "hits") {
             setHits({ speaker: evt.speaker, hits: evt.hits });
           } else if (evt.t === "speaker") {
@@ -272,6 +290,7 @@ export default function ChatRoom({
         summary: done?.summary,
         appendedBySpeaker,
         error: streamError,
+        processedUserText,
       };
     } catch (e) {
       // 网络中断等：用户消息可能已经落库，带上已知的真 id 交给调用方判断
@@ -302,7 +321,7 @@ export default function ChatRoom({
     const realId = r.userMessageId;
     setMsgs((m) => {
       const settled = realId
-        ? m.map((x) => (x.id === tmpId ? { ...x, id: realId } : x))
+        ? m.map((x) => (x.id === tmpId ? { ...x, id: realId, content: r.processedUserText ?? x.content } : x))
         : m.filter((x) => x.id !== tmpId);
       if (r.error || r.appendedBySpeaker) return settled;
       return [
@@ -650,6 +669,14 @@ export default function ChatRoom({
     <div className="flex min-h-[calc(100vh-7.5rem)] flex-col gap-3 lg:flex-row">
       {/* 主聊天列 */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {(conv.tier === "light" ? conv.lightMock : conv.qualityMock) && (
+          <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            <span>◉ 正在使用内置演示模型，回复为固定模板（人设/世界书/记忆都不会生效）</span>
+            <Link href="/settings" className="ml-auto whitespace-nowrap font-medium underline hover:text-amber-900">
+              去设置页接入
+            </Link>
+          </div>
+        )}
         {/* 顶栏 */}
         <div className={card + " flex flex-wrap items-center gap-2 px-4 py-2.5"}>
           <Link href="/" className="text-sm text-zinc-400 hover:text-indigo-500">

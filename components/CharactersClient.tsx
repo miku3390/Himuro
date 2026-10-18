@@ -40,6 +40,9 @@ export default function CharactersClient({
           ttsPromptLang: "",
           ttsLang: "",
           ttsRate: 0,
+          personaInject: "",
+          authorNote: "",
+          authorNoteDepth: 0,
         },
         true,
       );

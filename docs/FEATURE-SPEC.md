@@ -8,7 +8,7 @@
 **官方口径**：最小结构五件套 —— 身份一句话 / 说话方式 / 价值观 / 禁忌边界 / 对用户的称呼习惯；外加 3–5 组「用户说/角色回」示例对话锁语感；调试顺序 = 先闲聊 → 再冲突 → 最后长线剧情，每轮只改一个变量；写完先自己聊 20 轮再公开。
 
 **Himuro 实现**：
-- `characters` 表五件套字段 + `relationship`（关系）+ `firstMessage`（开场白，fy_online 教程补充口径）+ `examplesJson`（示例对话，最多 5 组，超出淘汰最早）
+- `characters` 表五件套字段 + `relationship`（关系）+ `firstMessage`（开场白，fy_online 教程补充口径）+ `examplesJson`（示例对话，最多 5 组，超出淘汰最早）+ `personaInject`（人格注入细则，v1.9：整段并入 system prompt 的「# 角色人格细则」）+ `authorNote`/`authorNoteDepth`（Author's Note，v1.9：每轮注入提醒，深度 0–12，0=system 末尾 / N=倒数第 N+1 条消息前）
 - 模板角色中心：3 个内置模板（温柔陪伴/傲娇斗嘴/连载剧情各一），支持直接试聊、复制为可编辑副本
 - Himuro 卡 JSON 导入导出（`{format:"himuro-card", version:1, card:{...}}`）
 - 复盘回写：聊天页任意角色回复可「存为示例」，连同前一条用户消息写入角色卡
@@ -45,7 +45,7 @@
 
 **官方口径**：轻量 = 快、适合日常与试设定；高质量 = 细节情绪好、适合定稿连载；按创作阶段切换。
 
-**Himuro 实现**：`conversations.tier` 会话级切换；`settings` 表存轻量/高质量两组 OpenAI 兼容配置（baseUrl/apiKey/model）。`baseUrl === "mock"` 时走内置演示模型（离线假回复，开箱即测）。另有一组可选 Embedding 配置。
+**Himuro 实现**：`conversations.tier` 会话级切换；`settings` 表存轻量/高质量两组 OpenAI 兼容配置（baseUrl/apiKey/model）。`baseUrl === "mock"` 时走内置演示模型（离线假回复，开箱即测）。另有一组可选 Embedding 配置。v1.9 起每档附采样参数微调（temperature / top_p，top_p=1 不发送），质量评测脚本 `npm run eval` 用真模型对样板卡跑场景化硬指标（入戏/禁语/节奏/世界书命中/反模板复读）。
 
 ## 六、语音
 
@@ -79,4 +79,7 @@
 | 导出/分享补全 | ST 角色卡 PNG 导出（可选底图）；会话 JSON 导入（角色 id→名字→自动建卡三级兜底）；全库备份/恢复 | ✅ v1.7 |
 | 分支树可视化 | 侧栏面板列出活跃路径上的分叉点与各备选摘录，点选即切换；显示活跃路径/库存消息数 | ✅ v1.8 |
 | 角色公开/分享 | 导出卡文件的社区形态；本地版可先做「分享 = 发 JSON/PNG 文件」 | PNG/JSON 卡文件已可分享（v1.7），社区形态不做 |
-| 正则/脚本 | SillyTavern 式输出后处理 | 待做 |
+| 正则/脚本 | SillyTavern 式输出后处理：规则可视化 CRUD + 试跑预览，用户输入发送/入库前改写，模型输出生成后改写（refine 事件实时替换气泡）；target=输入/输出/两者 + enabled 开关 | ✅ v1.9 |
+| 提示词注入深化 | personaInject 整段人格细则 + Author's Note（深度可调）+ 示例对话 few-shot 化 | ✅ v1.9 |
+| 采样参数 | 每档独立 temperature / top_p | ✅ v1.9 |
+| 质量自动评测 | `npm run eval`：真模型场景化跑分（禁语/称呼/节奏/世界书/反模板），报告落 data/eval | ✅ v1.9 |

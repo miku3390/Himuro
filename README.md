@@ -20,6 +20,11 @@
 | SillyTavern 角色卡导入 | 拖入 PNG 卡或 V1/V2/V3 JSON 卡即入库（宏替换 + 五件套映射） |
 | —— v1.2 新增 —— | |
 | 多角色群聊 | 2–N 个角色同场：谁被@谁答 / 依次发言 / 全员发言三种策略，成员可中途加减，同轮发言按顺序互相可见，各角色独立世界书命中 |
+| —— v1.9 新增 —— | |
+| SillyTavern 风格提示词注入 | 角色卡新增**人格注入细则**（personaInject，整段并入 system prompt）与 **Author's Note**（每轮提醒，深度 0–12 可调：0=附于 system 末尾，N=插入倒数第 N+1 条消息前）；示例对话转为真正的 few-shot 消息注入 |
+| 正则后处理（酒馆同款） | 每条规则：查找正则 → 替换 → 目标（用户输入/模型输出/两者）→ 作用范围；在设置页可视化 CRUD + 试跑预览；用户输入 Prior to 入库/发送改写，模型输出生成完毕后改写并实时 refine 消息气泡 |
+| 采样参数微调 | 每档可单独调 temperature / top_p（top_p=1 不发送），与既有轻量/高质量档配置并列保存 |
+| 质量自动评测 | `npm run eval`（`--tier light|quality` `--rounds N` `--repeat-check`）：入戏、称呼禁令、禁语、风格节奏、弱关键词、世界书命中、反模板收尾复读、同句复读检测，报告落 `data/eval/`（含完整回复文本） |
 
 ## 快速开始
 
@@ -28,6 +33,9 @@ npm install
 npm run dev        # 开发模式，http://localhost:3000
 # 或
 npm run build && npm start   # 生产模式
+
+npm run smoke      # 全链路冒烟测试（mock 模型）
+npm run eval       # 真模型质量评测（需先在设置页配好 API），--tier light|quality
 ```
 
 > 仓库根有 `.npmrc` 设了 `ignore-scripts=true`：依赖（better-sqlite3 等）自带预编译产物，不需要安装期脚本，而 better-sqlite3 包内有 `binding.gyp` 会触发 node-gyp 编译，在没有 Visual Studio 的机器上直接装不上。将来引入需要编译期脚本的依赖时，用 `npm rebuild <包名> --foreground-scripts` 单独放行。
@@ -47,8 +55,8 @@ npm run build && npm start   # 生产模式
 
 ## 数据与隐私
 
-- 所有数据存本机 `data/himuro.db`（SQLite），API Key 存本机数据库，不出本机。
-- 删除 `data/` 目录即恢复出厂（重新启动会自动重建库 + 三个模板角色）。
+- 所有数据存本机 `data/himuro.db`（SQLite），API Key 存本机数据库，不出本机；`data/`（含评测报告）整体被 gitignore。
+- 删除 `data/` 目录即恢复出厂（重新启动会自动重建库 + 模板角色，出厂自带「红莉栖」样板卡：人格注入 + 作者注释 + 世界书 + 示例对话的完整示例，见 `lib/personas/kurisu.json`，可用 `node scripts/add-kurisu.mjs --force` 同步到已有库）。
 
 ## 文档（迭代前必读）
 

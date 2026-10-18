@@ -44,7 +44,19 @@ export const characters = sqliteTable("characters", {
   ttsLang: text("tts_lang").notNull().default(""),
   /** 角色级语速；0 = 未配置，回退到设置页的全局语速（1.0 是合法语速，所以不能用 0 之外的哨兵） */
   ttsRate: real("tts_rate").notNull().default(0),
-  /** 模板角色：只用来开新卡/试聊，不出现在普通列表 */
+  /**
+   * 自由人格注入（酒柜「系统备注」对等）：原文整段拼进 system prompt，
+   * 与五件套字段分开，专门装长篇规则文本（人格细则、行为边界等）
+   */
+  personaInject: text("persona_inject").notNull().default(""),
+  /** 作者注释（酒馆 Author's Note 对等）：随每轮注入的强提示 */
+  authorNote: text("author_note").notNull().default(""),
+  /**
+   * 作者注释注入深度：0 = 附在 system prompt 末尾；
+   * 1..N = 作为独立 system 消息插进对话倒数第 N 条之前（深度越大离当前轮越远）
+   */
+  authorNoteDepth: integer("author_note_depth").notNull().default(0),
+  /** 模板角色：只用来开新卡/试聊，不出现在普通列�?*/
   isTemplate: integer("is_template").notNull().default(0),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
@@ -149,6 +161,23 @@ export const msgChunks = sqliteTable("msg_chunks", {
   createdAt: integer("created_at").notNull(),
 });
 
+/** 正则后处理（酒馆 Regex 对等）：input=改写用户消息，output=改写角色回复 */
+export const regexRules = sqliteTable("regex_rules", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  findRegex: text("find_regex").notNull(),
+  /** 替换文本，可用 $1/$2 引用捕获组 */
+  replacement: text("replacement").notNull().default(""),
+  /** flag 串，默认 g（全局替换） */
+  flags: text("flags").notNull().default("g"),
+  /** input = 用户输入改写；output = 角色回复改写（回复生成完、落库前应用） */
+  target: text("target").notNull().default("output"),
+  enabled: integer("enabled").notNull().default(1),
+  sort: integer("sort").notNull().default(0),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 /** 全局设置：单行表（id=1） */
 export const settings = sqliteTable("settings", {
   id: integer("id").primaryKey(),
@@ -168,6 +197,11 @@ export const settings = sqliteTable("settings", {
   wbMaxHits: integer("wb_max_hits").notNull().default(6),
   /** 向量检索注入条数 */
   vecTopK: integer("vec_top_k").notNull().default(4),
+  /** 聊天采样参数（分档存储；top_p 用 1 之外的可调值，1 = 不发送该参数） */
+  lightTemp: real("light_temp").notNull().default(0.8),
+  lightTopP: real("light_top_p").notNull().default(1),
+  qualityTemp: real("quality_temp").notNull().default(0.8),
+  qualityTopP: real("quality_top_p").notNull().default(1),
   /** TTS（浏览器语音）参数 */
   ttsVoice: text("tts_voice").notNull().default(""),
   /** 语速，三条链路通用：browser 的 rate / GPT-SoVITS 的 speed_factor / OpenAI 的 speed */

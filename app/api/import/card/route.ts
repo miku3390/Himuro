@@ -61,6 +61,9 @@ export async function POST(req: Request) {
         ttsPromptLang: "",
         ttsLang: "",
         ttsRate: 0,
+        personaInject: card.personaInject ?? "",
+        authorNote: card.authorNote ?? "",
+        authorNoteDepth: card.authorNoteDepth ?? 0,
       },
       true,
     );

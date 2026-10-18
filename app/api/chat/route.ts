@@ -15,6 +15,8 @@ import {
 } from "@/lib/group";
 import type { GroupStrategy } from "@/lib/types";
 import { getSettings } from "@/lib/settings";
+import { applyRegexRules } from "@/lib/regex";
+import { enabledRegexRules } from "@/lib/memory";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -44,8 +46,12 @@ export async function POST(req: Request) {
     rerollMessageId?: string;
   };
   const conversationId = body.conversationId;
-  const content = (body.content ?? "").trim();
   const isReroll = body.reroll === true;
+
+  // 输入正则改写（酒馆式）：在判定空消息之前应用，改空了就保留原文
+  const rawContent = (body.content ?? "").trim();
+  const content =
+    isReroll || !rawContent ? rawContent : applyRegexRules(rawContent, "input", enabledRegexRules("input"));
   if (!conversationId || (!isReroll && !content)) {
     return Response.json({ error: "缺少 conversationId 或 content" }, { status: 400 });
   }
@@ -187,7 +193,13 @@ export async function POST(req: Request) {
       try {
         // 先把手里的用户消息真 id 发出去：流中断时客户端也不会拿着一个伪造 id
         // 去执行编辑/删除/星标（那些操作都按 id 找服务端的行）
-        if (userMsgId) emit({ t: "user_msg", id: userMsgId });
+        if (userMsgId)
+          emit({
+            t: "user_msg",
+            id: userMsgId,
+            // 输入正则改写过的文本：前端拿它替换乐观插入的原始气泡
+            processed: content,
+          });
 
         if (isGroup) {
           emit({

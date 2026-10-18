@@ -3,14 +3,38 @@
 import { useEffect, useState, useTransition } from "react";
 import {
   clearTtsCacheAction,
+  deleteRegexRule,
+  listRegexRules,
+  saveRegexRule,
   saveSettingsAction,
   testModelConfig,
   ttsCacheInfoAction,
 } from "@/lib/actions";
 import { getChineseVoices, speak } from "@/lib/tts";
 import type { AppSettings, TtsProvider } from "@/lib/settings";
-import type { ModelConfig } from "@/lib/types";
-import { btnGhost, btnPrimary, card, input, label } from "@/lib/ui";
+import type { ModelConfig, RegexRule } from "@/lib/types";
+import { btnGhost, btnPrimary, card, input, label, textarea } from "@/lib/ui";
+
+/** 客户端试跑：按 sort 顺序套用 output 规则；非法正则跳过并标注 */
+function previewResult(text: string, rules: RegexRule[]): string {
+  const enabled = rules.filter((r) => r.enabled && r.target === "output");
+  if (!text.trim() || enabled.length === 0) return "（贴入文本后实时预览）";
+  let out = text;
+  let log = "";
+  for (const r of enabled) {
+    try {
+      out = out.replace(new RegExp(r.findRegex, r.flags), r.replacement);
+      log += `✔ ${r.name || r.findRegex}\n`;
+    } catch (e) {
+      log += `✘ ${r.name || r.findRegex}（正则无效：${e instanceof Error ? e.message : "?"}）\n`;
+    }
+    if (!out.trim()) {
+      log += "※ 改空了：服务端会保留原文（防丢消息）\n";
+      break;
+    }
+  }
+  return log + "→ " + (out.trim() || "（原文保留）");
+}
 
 type Settings = {
   light: ModelConfig;
@@ -19,6 +43,10 @@ type Settings = {
   summaryEveryTurns: number;
   wbMaxHits: number;
   vecTopK: number;
+  lightTemp: number;
+  lightTopP: number;
+  qualityTemp: number;
+  qualityTopP: number;
   ttsVoice: string;
   ttsRate: number;
   ttsPitch: number;
@@ -47,9 +75,13 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
   const [ttsHint, setTtsHint] = useState("");
   const [cacheInfo, setCacheInfo] = useState<{ files: number; bytes: number } | null>(null);
   const [restoreMsg, setRestoreMsg] = useState("");
+  const [regexRulesState, setRegexRulesState] = useState<RegexRule[]>([]);
+  const [regexPreview, setRegexPreview] = useState("");
+  const [regexMsg, setRegexMsg] = useState("");
 
   useEffect(() => {
     ttsCacheInfoAction().then(setCacheInfo).catch(() => setCacheInfo({ files: 0, bytes: 0 }));
+    listRegexRules().then(setRegexRulesState).catch(() => setRegexRulesState([]));
   }, []);
 
   useEffect(() => {
@@ -217,6 +249,179 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
               value={form.vecTopK}
               onChange={(e) => setForm((f) => ({ ...f, vecTopK: Number(e.target.value) || 0 }))}
             />
+          </div>
+        </div>
+      </section>
+
+      <section className={card + " p-5"}>
+        <h2 className="mb-3 font-semibold">采样参数（扮演质量敏感，分档可调）</h2>
+        <div className="grid gap-3 md:grid-cols-2">
+          {(
+            [
+              ["lightTemp", "lightTopP", "轻量档"],
+              ["qualityTemp", "qualityTopP", "高质量档"],
+            ] as const
+          ).map(([tKey, pKey, title]) => (
+            <div key={tKey} className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className={label}>{title} temperature</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.05}
+                  className={input}
+                  value={form[tKey]}
+                  onChange={(e) => setForm((f) => ({ ...f, [tKey]: Number(e.target.value) }))}
+                />
+              </div>
+              <div>
+                <label className={label}>{title} top_p（1 = 不发送）</label>
+                <input
+                  type="number"
+                  min={0.1}
+                  max={1}
+                  step={0.01}
+                  className={input}
+                  value={form[pKey]}
+                  onChange={(e) => setForm((f) => ({ ...f, [pKey]: Number(e.target.value) }))}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-zinc-400">
+          扮演类任务建议 temperature 0.75–0.95 求活泼；收不住架势就往下调。摘要/提炼等内部任务不使用这里的参数。
+        </p>
+      </section>
+
+      <section className={card + " p-5"}>
+        <h2 className="mb-1 font-semibold">正则后处理（酒馆 Regex 式，入库前生效）</h2>
+        <p className="mb-3 text-xs text-zinc-400">
+          input = 改写用户消息（发送前）；output = 改写角色回复（生成完、落库前）。JS 正则语法，flags 默认
+          g；替换可用 $1/$2 捕获组。改写结果直接入库，显示/导出/重Roll 上下文一致。
+        </p>
+        <div className="flex flex-col gap-3">
+          {regexRulesState.map((r, i) => (
+            <div key={r.id} className="rounded-xl border border-zinc-100 bg-zinc-50 p-3">
+              <div className="grid gap-2 md:grid-cols-6">
+                <input
+                  className={input}
+                  placeholder="名称"
+                  value={r.name}
+                  onChange={(e) =>
+                    setRegexRulesState((rs) => rs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))
+                  }
+                />
+                <input
+                  className={input + " md:col-span-2 font-mono"}
+                  placeholder="findRegex，如 \\n\\n.*终$"
+                  value={r.findRegex}
+                  onChange={(e) =>
+                    setRegexRulesState((rs) => rs.map((x, j) => (j === i ? { ...x, findRegex: e.target.value } : x)))
+                  }
+                />
+                <input
+                  className={input + " md:col-span-2 font-mono"}
+                  placeholder="替换文本，$1 引捕获组"
+                  value={r.replacement}
+                  onChange={(e) =>
+                    setRegexRulesState((rs) => rs.map((x, j) => (j === i ? { ...x, replacement: e.target.value } : x)))
+                  }
+                />
+                <input
+                  className={input + " font-mono"}
+                  placeholder="flags"
+                  value={r.flags}
+                  onChange={(e) =>
+                    setRegexRulesState((rs) => rs.map((x, j) => (j === i ? { ...x, flags: e.target.value } : x)))
+                  }
+                />
+                <select
+                  className={input}
+                  value={r.target}
+                  onChange={(e) =>
+                    setRegexRulesState((rs) =>
+                      rs.map((x, j) =>
+                        j === i ? { ...x, target: e.target.value === "input" ? ("input" as const) : ("output" as const) } : x,
+                      ),
+                    )
+                  }
+                >
+                  <option value="output">角色回复</option>
+                  <option value="input">用户输入</option>
+                </select>
+              </div>
+              <div className="mt-2 flex items-center gap-3 text-xs">
+                <label className="flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={r.enabled}
+                    onChange={(e) =>
+                      setRegexRulesState((rs) => rs.map((x, j) => (j === i ? { ...x, enabled: e.target.checked } : x)))
+                    }
+                  />
+                  启用
+                </label>
+                <button
+                  className="text-zinc-400 hover:text-red-500"
+                  onClick={() =>
+                    startTransition(async () => {
+                      await deleteRegexRule(r.id);
+                      setRegexRulesState((rs) => rs.filter((_, j) => j !== i));
+                    })
+                  }
+                >
+                  删除
+                </button>
+                {regexMsg && <span className="text-red-500">{regexMsg}</span>}
+              </div>
+            </div>
+          ))}
+          <div className="flex items-center gap-2">
+            <button
+              className={btnGhost + " text-xs"}
+              onClick={() =>
+                setRegexRulesState((rs) => [
+                  ...rs,
+                  { id: "", name: "", findRegex: "", replacement: "", flags: "g", target: "output", enabled: true, sort: rs.length },
+                ])
+              }
+            >
+              ＋ 新增规则
+            </button>
+            <button
+              className={btnGhost + " text-xs"}
+              disabled={pending}
+              onClick={() =>
+                startTransition(async () => {
+                  try {
+                    for (const r of regexRulesState) {
+                      await saveRegexRule(r);
+                    }
+                    setRegexRulesState(await listRegexRules());
+                    setRegexMsg("已保存");
+                    setTimeout(() => setRegexMsg(""), 1500);
+                  } catch (e) {
+                    setRegexMsg(e instanceof Error ? e.message : "保存失败");
+                  }
+                })
+              }
+            >
+              保存正则规则
+            </button>
+          </div>
+          <div>
+            <label className={label}>试跑预览（模拟 output 目标按序改写）</label>
+            <textarea
+              className={textarea + " min-h-16"}
+              value={regexPreview}
+              onChange={(e) => setRegexPreview(e.target.value)}
+              placeholder="贴一段回复文本实时预览改写结果"
+            />
+            <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-zinc-900 p-3 text-xs text-zinc-100">
+              {previewResult(regexPreview, regexRulesState)}
+            </pre>
           </div>
         </div>
       </section>

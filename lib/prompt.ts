@@ -24,6 +24,14 @@ export type PromptInput = {
   groupOthers?: string[];
 };
 
+/** 示例对话片段：不再塞 system，而是拼成 user/assistant 消息插到 system 之后（few-shot 比 system 描述锁语感强） */
+export function buildExampleMessages(c: CharacterCard): { role: "user" | "assistant"; content: string }[] {
+  return c.examples.map((e: Example) => [
+    { role: "user" as const, content: e.user },
+    { role: "assistant" as const, content: e.assistant },
+  ]).flat();
+}
+
 const MODE_DAILY = `# 模式：日常聊天
 - 保持口语化、自然，像真人聊天；回复长度贴合用户输入，不写长篇大论。
 - 用户可能给出「情绪目标」，本轮请贴合该基调回应（安慰：先共情再宽慰；斗嘴：接住梗、不真生气；并肩作战：站在同一阵线）。`;
@@ -48,16 +56,16 @@ export function buildSystemPrompt(input: PromptInput): string {
 - 与用户的关系：${c.relationship || "（未设定）"}`,
   );
 
+  // 自由人格注入槽（酒馆「系统备注」对等）：长篇人格细则原文整段贴进来，不拆改
+  if (c.personaInject.trim()) {
+    parts.push(`# 角色人格细则（附加强提示，最高优先级遵守）\n${c.personaInject.trim()}`);
+  }
+
+  // 示例对话改为 few-shot 消息（在 chatEngine 里插到 system 之后），这里只留一句说明
   if (c.examples.length > 0) {
     parts.push(
-      `# 对话示例（学习语气与节奏，不要在正文中复述）
-${c.examples
-  .map(
-    (e: Example, i: number) =>
-      `示例${i + 1}\n用户：${e.user}\n${c.name}：${e.assistant}`,
-  )
-  .join("\n\n")}`,
-  );
+      `# 对话示例（紧随本设定的「用户/角色」交替消息，学习语气与节奏用，不要在正文中复述，也不要当作真实聊天记录）`,
+    );
   }
 
   if (input.summary) {
@@ -98,9 +106,15 @@ ${c.examples
     parts.push(`# 本轮情绪目标\n用户期待的情绪基调：「${input.emotion}」。`);
   }
 
+  if (input.character.authorNote.trim() && input.character.authorNoteDepth === 0) {
+    parts.push(`# 作者注释（每轮提醒）\n${input.character.authorNote.trim()}`);
+  }
+
   parts.push(
     `# 输出要求
-- 始终以 ${c.name} 的身份回复，保持入戏，不要复述本设定，不要输出「作为AI」之类的话。`,
+- 始终以 ${c.name} 的身份回复，保持入戏，不要复述本设定，不要输出「作为AI」之类的话。
+- 不要每轮以相同句式收尾；除非剧情需要，禁止把「问句结束」当成万能收尾，换着方式落句。
+- 收束短句严禁逐字复用：对比最近几条回复的最后一行，若禁不住想说和上一次完全相同的话（如同一句「去睡」「休息」），必须改写成完全不同的措辞或换成另一个落点。`,
   );
 
   return parts.join("\n\n");

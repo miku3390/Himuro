@@ -29,7 +29,7 @@ export default function CharacterEditor({
   const [ttsBusy, setTtsBusy] = useState(false);
   const [ttsMsg, setTtsMsg] = useState("");
 
-  const set = (key: keyof typeof form) => (v: string) => setForm((f) => ({ ...f, [key]: v }));
+  const set = (key: keyof typeof form) => (v: string | number) => setForm((f) => ({ ...f, [key]: v }));
 
   function save() {
     setError("");
@@ -71,6 +71,9 @@ export default function CharacterEditor({
         ttsPromptLang: form.ttsPromptLang,
         ttsLang: form.ttsLang,
         ttsRate: form.ttsRate,
+        personaInject: form.personaInject,
+        authorNote: form.authorNote,
+        authorNoteDepth: form.authorNoteDepth,
       },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -272,6 +275,46 @@ export default function CharacterEditor({
           {form.examples.length === 0 && (
             <p className="text-sm text-zinc-400">还没有示例。建议至少写 3 组，聊天页里也可把满意的对话一键回写成示例。</p>
           )}
+        </div>
+      </section>
+
+      {/* 人格注入（酒馆式） */}
+      <section className={card + " p-5"}>
+        <h2 className="mb-1 font-semibold">人格注入（可选·酒馆式）</h2>
+        <p className="mb-4 text-xs text-zinc-400">
+          长篇人格细则、行为边界等原文整段拼进 system prompt（五件套之后），不拆改、不失真；
+          有这里就不用硬塞进上面的小字段。作者注释是每轮都注入的强提示。
+        </p>
+        <div className="flex flex-col gap-4">
+          <div>
+            <label className={label}>自由人格注入（原文整段）</label>
+            <textarea
+              className={textarea + " min-h-40 font-mono"}
+              value={form.personaInject}
+              onChange={(e) => set("personaInject")(e.target.value)}
+              placeholder="把完整人格提示词贴进来，如：核心隐喻 / 情绪状态 / 对话策略 / 物语辞藻……"
+            />
+          </div>
+          <div>
+            <label className={label}>作者注释（Author’s Note，每轮注入）</label>
+            <textarea
+              className={textarea + " min-h-20"}
+              value={form.authorNote}
+              onChange={(e) => set("authorNote")(e.target.value)}
+              placeholder="如：当前处于监狱篇，说话经常语无伦次；偏一句需求给一句真理。"
+            />
+          </div>
+          <div className="w-64">
+            <label className={label}>注入深度（0 = 拼在 system 末尾；N = 插到倒数第 N 条消息前）</label>
+            <input
+              className={input}
+              type="number"
+              min={0}
+              max={12}
+              value={form.authorNoteDepth}
+              onChange={(e) => set("authorNoteDepth")(Number(e.target.value) || 0)}
+            />
+          </div>
         </div>
       </section>
 

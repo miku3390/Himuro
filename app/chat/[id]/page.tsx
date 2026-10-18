@@ -5,6 +5,7 @@ import { characters, conversations, convMembers, messages as messagesTable } fro
 import { alternativesOf, getActivePath, getAllMessages, withAltInfo } from "@/lib/branch";
 import ChatRoom from "@/components/ChatRoom";
 import { getCharacterCard } from "@/lib/memory";
+import { getSettings } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +71,7 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
     .where(eq(characters.isTemplate, 0))
     .all();
 
+  const settings = getSettings();
   return (
     <ChatRoom
       conversation={{
@@ -80,6 +82,8 @@ export default async function ChatPage({ params }: { params: Promise<{ id: strin
         chapter: conv.chapter,
         summary: conv.summaryText,
         groupStrategy: (conv.groupStrategy as "mention" | "rotate" | "all" | null) ?? null,
+        lightMock: settings.light.baseUrl === "mock",
+        qualityMock: settings.quality.baseUrl === "mock",
       }}
       character={character}
       members={charRows}

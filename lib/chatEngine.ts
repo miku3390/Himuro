@@ -10,9 +10,11 @@ import {
   storeEmbedding,
   VERBATIM_WINDOW,
 } from "@/lib/memory";
-import { buildSystemPrompt } from "@/lib/prompt";
+import { buildExampleMessages, buildSystemPrompt } from "@/lib/prompt";
 import { streamChat } from "@/lib/llm";
-import { modelFor, type AppSettings } from "@/lib/settings";
+import { applyRegexRules } from "@/lib/regex";
+import { enabledRegexRules } from "@/lib/memory";
+import { modelFor, samplingFor, type AppSettings } from "@/lib/settings";
 import type { CharacterCard, Mode, WbEntry } from "@/lib/types";
 
 /**
@@ -94,25 +96,55 @@ export async function generateOneReply(
     groupOthers: p.isGroup ? p.groupOthers : undefined,
   });
 
-  const chatMessages = [
-    { role: "system" as const, content: system },
-    ...recent.map((m) => ({
+  const chatMessages: { role: "system" | "user" | "assistant"; content: string }[] = [
+    { role: "system", content: system },
+  ];
+
+  // 示例对话 few-shot：user/assistant 交替插在 system 与真实历史之间
+  const exampleMessages = buildExampleMessages(p.character);
+  if (exampleMessages.length > 0) chatMessages.push(...exampleMessages);
+
+  const historyMessages: { role: "system" | "user" | "assistant"; content: string }[] = recent.map(
+    (m) => ({
       role: m.role as "user" | "assistant",
       content:
         p.isGroup && m.role === "assistant" && m.characterId
           ? `（${p.memberNameById[m.characterId] ?? "角色"}）：${m.content}`
           : m.content,
-    })),
-  ];
+    }),
+  );
+
+  // 作者注释深度注入：depth>=1 时作为独立 system 消息插进历史倒数第 depth 条之前
+  const note = p.character.authorNote.trim();
+  const depth = Math.max(0, Math.floor(p.character.authorNoteDepth || 0));
+  if (note && depth > 0) {
+    const at = Math.max(0, historyMessages.length - depth);
+    historyMessages.splice(at, 0, { role: "system", content: `# 作者注释（每轮提醒·深度注入）\n${note}` });
+  }
+  chatMessages.push(...historyMessages);
+
+  const outputRules = enabledRegexRules("output");
+  const sampling = samplingFor(settings, p.tier as "light" | "quality");
 
   let full = "";
   for await (const token of streamChat({
     config: modelFor(settings, p.tier),
     messages: chatMessages,
     mockHint: { kind: "chat", characterName: p.character.name, userText: queryText || p.content, mode: p.mode },
+    temperature: sampling.temperature,
+    topP: sampling.topP,
   })) {
     full += token;
     emit({ t: "tok", v: token });
+  }
+
+  // 正则后处理（酒馆式）：回复生成完、落库前统一改写；有变化时用 refine 事件让前端替换最终文本
+  if (outputRules.length > 0) {
+    const refined = applyRegexRules(full, "output", outputRules);
+    if (refined !== full) {
+      full = refined;
+      emit({ t: "refine", v: refined });
+    }
   }
 
   // 回复落库（idx 取当前消息数，兼容同一轮多个发言者依次入库）
