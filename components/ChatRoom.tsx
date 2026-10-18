@@ -155,6 +155,7 @@ export default function ChatRoom({
   const [ttsPanelFor, setTtsPanelFor] = useState<string | null>(null);
   const [ttsSegments, setTtsSegments] = useState<string[]>([]);
   const [ttsProgress, setTtsProgress] = useState<string | null>(null);
+  const [speakingFor, setSpeakingFor] = useState<string | null>(null);
 
   useEffect(() => {
     // localStorage 只在客户端可读：从 effect 里同步给 state（SSR 首帧取不到是预期行为）
@@ -475,22 +476,25 @@ export default function ChatRoom({
     };
   }
 
-  /** 短文本直接播；长文本展开逐段面板（GPT-SoVITS 长句合成又慢又差） */
+  /** 试听：直接逐句顺序播放全文；再点同一条即停止 */
   async function handleListen(m: Msg) {
     stopSpeak();
     setTtsProgress(null);
-    const segs = splitSentences(m.content);
-    if (ttsProvider !== "browser" && segs.length > 2) {
-      setTtsSegments(segs);
-      setTtsPanelFor(m.id);
+    if (speakingFor === m.id) {
+      setSpeakingFor(null);
       return;
     }
+    setSpeakingFor(m.id);
     try {
-      await speak(m.content, ttsOpts(m));
+      await speak(m.content, {
+        ...ttsOpts(m),
+        onProgress: (i: number, n: number) => setTtsProgress(`${i}/${n}`),
+      });
     } catch (e) {
       flash(e instanceof Error ? e.message : "TTS 失败");
     } finally {
       setTtsProgress(null);
+      if (speakingFor === m.id) setSpeakingFor(null);
     }
   }
 
@@ -511,12 +515,6 @@ export default function ChatRoom({
   }
 
   async function handleDownloadVoice(m: Msg) {
-    const segs = splitSentences(m.content);
-    if (segs.length > 2) {
-      setTtsSegments(segs);
-      setTtsPanelFor(ttsPanelFor === m.id ? null : m.id);
-      return;
-    }
     try {
       await downloadTts(m.content, m.characterId ?? character.id);
     } catch (e) {
@@ -917,17 +915,40 @@ export default function ChatRoom({
                         <button className="hover:text-zinc-700" onClick={() => navigator.clipboard.writeText(m.content)}>
                           复制
                         </button>
-                        <button
-                          className="hover:text-indigo-500"
-                          onClick={() => handleListen(m)}
-                          title={m.characterId ? "用该角色自己的音色朗读" : undefined}
-                        >
-                          ▶ 试听
-                        </button>
-                        {ttsProvider !== "browser" && (
-                          <button className="hover:text-indigo-500" title="下载语音文件" onClick={() => handleDownloadVoice(m)}>
-                            ⬇ 语音
+                        {speakingFor === m.id ? (
+                          <button
+                            className="hover:text-red-500"
+                            onClick={() => handleListen(m)}
+                            title="停止试听"
+                          >
+                            ⏹ 停止{ttsProgress ? `（${ttsProgress}）` : ""}
                           </button>
+                        ) : (
+                          <button
+                            className="hover:text-indigo-500"
+                            onClick={() => handleListen(m)}
+                            title={m.characterId ? "用该角色自己的音色朗读" : undefined}
+                          >
+                            ▶ 试听{ttsProgress ? `（${ttsProgress}）` : ""}
+                          </button>
+                        )}
+                        {ttsProvider !== "browser" && (
+                          <>
+                            <button
+                              className="hover:text-indigo-500"
+                              title="逐段试听/下载"
+                              onClick={() => {
+                                stopSpeak();
+                                setTtsSegments(splitSentences(m.content));
+                                setTtsPanelFor(ttsPanelFor === m.id ? null : m.id);
+                              }}
+                            >
+                              ⤓ 分段
+                            </button>
+                            <button className="hover:text-indigo-500" title="下载语音文件" onClick={() => handleDownloadVoice(m)}>
+                              ⬇ 语音
+                            </button>
+                          </>
                         )}
                         {m.role === "user" && (
                           <button className="hover:text-indigo-500" onClick={() => startEdit(m)}>
